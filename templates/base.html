@@ -42,6 +42,7 @@
         html {
             font-size: 14px;
             scroll-behavior: smooth;
+            -webkit-tap-highlight-color: transparent;
         }
 
         body {
@@ -70,6 +71,55 @@
             z-index: 100;
             backdrop-filter: blur(12px);
             -webkit-backdrop-filter: blur(12px);
+        }
+
+        /* ── Mobile bottom nav ── */
+        .bottom-nav {
+            display: none;
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background: var(--bg-secondary);
+            border-top: 1px solid var(--border);
+            z-index: 100;
+            padding: 0.35rem 0;
+            padding-bottom: calc(0.35rem + env(safe-area-inset-bottom, 0px));
+        }
+
+        .bottom-nav-inner {
+            display: flex;
+            justify-content: space-around;
+            align-items: center;
+        }
+
+        .bottom-nav a {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 0.15rem;
+            color: var(--text-muted);
+            text-decoration: none;
+            font-size: 0.6rem;
+            font-weight: 600;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            padding: 0.3rem 0.75rem;
+            border-radius: 6px;
+            transition: color 0.2s;
+        }
+
+        .bottom-nav a .nav-icon {
+            font-size: 1.25rem;
+            line-height: 1;
+        }
+
+        .bottom-nav a.active {
+            color: var(--accent);
+        }
+
+        .bottom-nav a:active {
+            background: rgba(255,255,255,0.05);
         }
 
         .nav-inner {
@@ -146,6 +196,79 @@
             margin: 0 auto;
             padding: 1.5rem;
         }
+
+        /* ── Mobile card list (replaces tables on small screens) ── */
+        .mobile-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        .mobile-item {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 0.85rem 1rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.75rem;
+            transition: border-color 0.2s;
+        }
+
+        .mobile-item:active {
+            border-color: var(--border-light);
+        }
+
+        .mobile-item-info {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .mobile-item-name {
+            font-weight: 600;
+            color: var(--text-primary);
+            font-size: 0.9rem;
+            margin-bottom: 0.2rem;
+        }
+
+        .mobile-item-meta {
+            font-size: 0.72rem;
+            color: var(--text-muted);
+            display: flex;
+            gap: 0.5rem;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .mobile-item-amount {
+            font-weight: 700;
+            color: var(--text-primary);
+            font-size: 0.95rem;
+            font-variant-numeric: tabular-nums;
+            white-space: nowrap;
+        }
+
+        .mobile-item-actions {
+            display: flex;
+            gap: 0.35rem;
+            flex-shrink: 0;
+        }
+
+        .mobile-item-actions .btn {
+            min-width: 36px;
+            min-height: 36px;
+            padding: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.85rem;
+        }
+
+        /* Desktop: hide mobile-only elements */
+        .mobile-only { display: none; }
+        .desktop-only { display: block; }
+        table.desktop-only { display: table; }
 
         /* ── Stats cards ── */
         .stats-grid {
@@ -298,13 +421,13 @@
         .form-select,
         .form-textarea {
             width: 100%;
-            padding: 0.6rem 0.75rem;
+            padding: 0.7rem 0.85rem;
             background: var(--bg-secondary);
             border: 1px solid var(--border);
-            border-radius: 6px;
+            border-radius: 8px;
             color: var(--text-primary);
             font-family: inherit;
-            font-size: 0.85rem;
+            font-size: 16px; /* prevents iOS zoom on focus */
             transition: border-color 0.2s, box-shadow 0.2s;
             outline: none;
         }
@@ -331,16 +454,17 @@
             align-items: center;
             justify-content: center;
             gap: 0.4rem;
-            padding: 0.55rem 1rem;
+            padding: 0.65rem 1.1rem;
             font-family: inherit;
-            font-size: 0.8rem;
+            font-size: 0.85rem;
             font-weight: 600;
             border: 1px solid transparent;
-            border-radius: 6px;
+            border-radius: 8px;
             cursor: pointer;
             transition: all 0.2s ease;
             text-decoration: none;
             letter-spacing: 0.02em;
+            min-height: 42px; /* comfortable touch target */
         }
 
         .btn-primary {
@@ -515,37 +639,83 @@
         /* ── Responsive ── */
         @media (max-width: 900px) {
             .layout-2col {
-                grid-template-columns: 1fr;
+                grid-template-columns: 1fr !important;
             }
         }
 
         @media (max-width: 640px) {
+            /* Hide top nav links, show bottom nav */
             .nav-links {
-                display: none;
-                position: absolute;
-                top: 56px;
-                left: 0;
-                right: 0;
-                flex-direction: column;
-                background: var(--bg-secondary);
-                border-bottom: 1px solid var(--border);
-                padding: 0.5rem 1rem;
-            }
-
-            .nav-links.open {
-                display: flex;
+                display: none !important;
             }
 
             .hamburger {
-                display: flex;
+                display: none;
+            }
+
+            .bottom-nav {
+                display: block;
+            }
+
+            /* Add safe area for bottom nav */
+            body {
+                padding-bottom: 72px;
+            }
+
+            .main-container {
+                padding: 1rem 0.75rem;
+            }
+
+            .card {
+                padding: 1rem;
+                border-radius: 10px;
             }
 
             .stats-grid {
                 grid-template-columns: 1fr 1fr;
+                gap: 0.6rem;
+            }
+
+            .stat-card {
+                padding: 0.85rem 1rem;
+                border-radius: 10px;
+            }
+
+            .stat-value {
+                font-size: 1.35rem;
             }
 
             .form-row {
                 grid-template-columns: 1fr;
+            }
+
+            .section-header {
+                padding-bottom: 0.5rem;
+            }
+
+            /* Show mobile list, hide desktop tables */
+            .mobile-only { display: flex; }
+            .mobile-list.mobile-only { display: flex; }
+            .desktop-only { display: none !important; }
+
+            /* Flash container on mobile */
+            .flash-container {
+                top: auto;
+                bottom: 80px;
+                right: 0.75rem;
+                left: 0.75rem;
+                max-width: 100%;
+            }
+
+            /* Layout reversed on mobile: form first */
+            .layout-2col {
+                display: flex !important;
+                flex-direction: column-reverse;
+                gap: 1rem;
+            }
+
+            .layout-2col.mobile-normal-order {
+                flex-direction: column;
             }
         }
 
@@ -723,6 +893,28 @@
     <footer style="text-align:center; padding: 2rem 1rem 1.5rem; color: var(--text-muted); font-size: 0.7rem; letter-spacing: 0.05em; text-transform: uppercase;">
         advisorAPP · {{ now.strftime('%Y') }}
     </footer>
+
+    <!-- ── Mobile Bottom Navigation ── -->
+    <nav class="bottom-nav" id="bottom-nav">
+        <div class="bottom-nav-inner">
+            <a href="{{ url_for('dashboard') }}" class="{% if request.endpoint == 'dashboard' %}active{% endif %}">
+                <span class="nav-icon">◈</span>
+                Home
+            </a>
+            <a href="{{ url_for('reports') }}" class="{% if request.endpoint == 'reports' %}active{% endif %}">
+                <span class="nav-icon">▤</span>
+                Reports
+            </a>
+            <a href="{{ url_for('categories') }}" class="{% if request.endpoint == 'categories' %}active{% endif %}">
+                <span class="nav-icon">⊞</span>
+                Categories
+            </a>
+            <a href="{{ url_for('wishlist') }}" class="{% if request.endpoint == 'wishlist' %}active{% endif %}">
+                <span class="nav-icon">✦</span>
+                Wishlist
+            </a>
+        </div>
+    </nav>
 
     {% block scripts %}{% endblock %}
 

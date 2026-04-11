@@ -7,7 +7,7 @@
     <span class="text-muted" style="font-size:0.72rem;">{{ categories | length }} categories</span>
 </div>
 
-<div class="layout-2col" style="grid-template-columns: 1fr 360px;">
+<div class="layout-2col">
     <!-- ── Category List ── -->
     <div class="card">
         <div class="section-header" style="margin-bottom:1rem;">
@@ -15,7 +15,8 @@
         </div>
 
         {% if categories %}
-        <table class="data-table">
+        <!-- Desktop table -->
+        <table class="data-table desktop-only">
             <thead>
                 <tr>
                     <th>Name</th>
@@ -37,10 +38,10 @@
                         Rp {{ "{:,.0f}".format(cat.total_amount) }}
                     </td>
                     <td style="text-align:right">
-                        <form id="del-cat-{{ cat.id }}" method="POST" action="{{ url_for('delete_category', cat_id=cat.id) }}" style="display:inline">
+                        <form id="del-cat-d-{{ cat.id }}" method="POST" action="{{ url_for('delete_category', cat_id=cat.id) }}" style="display:inline">
                             <button type="button"
                                     class="btn btn-danger btn-sm"
-                                    onclick="confirmDeleteCat('del-cat-{{ cat.id }}', '{{ cat.name }}', {{ cat.expense_count }})">
+                                    onclick="confirmDeleteCat('del-cat-d-{{ cat.id }}', '{{ cat.name }}', {{ cat.expense_count }})">
                                 Delete
                             </button>
                         </form>
@@ -49,6 +50,31 @@
                 {% endfor %}
             </tbody>
         </table>
+
+        <!-- Mobile card list -->
+        <div class="mobile-list mobile-only">
+            {% for cat in categories %}
+            <div class="mobile-item">
+                <div class="mobile-item-info">
+                    <div class="mobile-item-name">{{ cat.name }}</div>
+                    <div class="mobile-item-meta">
+                        <span>{{ cat.expense_count }} expenses</span>
+                        <span>·</span>
+                        <span class="mobile-item-amount">Rp {{ "{:,.0f}".format(cat.total_amount) }}</span>
+                    </div>
+                </div>
+                <div class="mobile-item-actions">
+                    <form id="del-cat-m-{{ cat.id }}" method="POST" action="{{ url_for('delete_category', cat_id=cat.id) }}" style="display:inline">
+                        <button type="button"
+                                class="btn btn-danger btn-sm"
+                                onclick="confirmDeleteCat('del-cat-m-{{ cat.id }}', '{{ cat.name }}', {{ cat.expense_count }})">
+                            ✕
+                        </button>
+                    </form>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
         {% else %}
         <div class="empty-state">
             <div class="icon">📁</div>

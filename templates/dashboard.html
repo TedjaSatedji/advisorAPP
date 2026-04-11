@@ -53,7 +53,9 @@
                     Rp {{ "{:,.0f}".format(entries | sum(attribute='amount')) }}
                 </span>
             </div>
-            <table class="data-table mb-2">
+
+            <!-- Desktop table -->
+            <table class="data-table mb-2 desktop-only">
                 <thead>
                     <tr>
                         <th style="width:30%">Description</th>
@@ -69,20 +71,40 @@
                         <td><span class="cat-pill">{{ e.category }}</span></td>
                         <td class="amount" style="text-align:right">Rp {{ "{:,.0f}".format(e.amount) }}</td>
                         <td style="text-align:right">
-                            <form id="del-exp-{{ e.id }}" method="POST" action="{{ url_for('delete_expense', expense_id=e.id) }}" style="display:inline">
-                                <button type="button" class="btn btn-ghost btn-sm text-danger" onclick="confirmDelete('del-exp-{{ e.id }}', '{{ e.description or 'this expense' }}')">✕</button>
+                            <form id="del-exp-d-{{ e.id }}" method="POST" action="{{ url_for('delete_expense', expense_id=e.id) }}" style="display:inline">
+                                <button type="button" class="btn btn-ghost btn-sm text-danger" onclick="confirmDelete('del-exp-d-{{ e.id }}', '{{ e.description or 'this expense' }}')">✕</button>
                             </form>
                         </td>
                     </tr>
                     {% endfor %}
                 </tbody>
             </table>
+
+            <!-- Mobile card list -->
+            <div class="mobile-list mobile-only mb-2">
+                {% for e in entries %}
+                <div class="mobile-item">
+                    <div class="mobile-item-info">
+                        <div class="mobile-item-name">{{ e.description or '—' }}</div>
+                        <div class="mobile-item-meta">
+                            <span class="cat-pill">{{ e.category }}</span>
+                        </div>
+                    </div>
+                    <div style="display:flex; align-items:center; gap:0.5rem;">
+                        <span class="mobile-item-amount">Rp {{ "{:,.0f}".format(e.amount) }}</span>
+                        <form id="del-exp-m-{{ e.id }}" method="POST" action="{{ url_for('delete_expense', expense_id=e.id) }}" style="display:inline">
+                            <button type="button" class="btn btn-ghost btn-sm text-danger" style="min-width:36px; min-height:36px; font-size:0.9rem;" onclick="confirmDelete('del-exp-m-{{ e.id }}', '{{ e.description or 'this expense' }}')">✕</button>
+                        </form>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
             {% endfor %}
         {% else %}
             <div class="empty-state">
                 <div class="icon">📊</div>
                 <p>No expenses recorded yet.</p>
-                <p style="font-size:0.75rem" class="mt-1">Use the form on the right to add your first entry.</p>
+                <p style="font-size:0.75rem" class="mt-1">Use the form below to add your first entry.</p>
             </div>
         {% endif %}
     </div>
@@ -144,8 +166,8 @@
         </div>
         {% endif %}
 
-        <!-- ── Quick Nav ── -->
-        <div class="card" style="padding:1rem 1.25rem;">
+        <!-- ── Quick Nav (hidden on mobile since we have bottom nav) ── -->
+        <div class="card desktop-only" style="padding:1rem 1.25rem;">
             <a href="{{ url_for('reports') }}" class="btn btn-secondary" style="width:100%; margin-bottom:0.5rem;">
                 📈 View Full Reports
             </a>

@@ -8,7 +8,7 @@
 </div>
 
 <!-- ── Stats Row ── -->
-<div class="stats-grid" style="grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); margin-bottom:1.5rem;">
+<div class="stats-grid" style="margin-bottom:1.5rem;">
     <div class="stat-card">
         <div class="stat-label">Wishlist Total</div>
         <div class="stat-value accent" style="font-size:1.4rem;">
@@ -25,7 +25,7 @@
     </div>
 </div>
 
-<div class="layout-2col" style="grid-template-columns: 1fr 380px;">
+<div class="layout-2col">
     <!-- ── Active Wishlist ── -->
     <div>
         <div class="card">
@@ -34,7 +34,8 @@
             </div>
 
             {% if active %}
-            <table class="data-table">
+            <!-- Desktop table -->
+            <table class="data-table desktop-only">
                 <thead>
                     <tr>
                         <th>Item</th>
@@ -59,19 +60,47 @@
                             <form method="POST" action="{{ url_for('purchase_wishlist', item_id=item.id) }}" style="display:inline">
                                 <button type="submit" class="btn btn-sm btn-secondary tooltip" data-tip="Mark purchased">✓</button>
                             </form>
-                            <form id="del-wish-{{ item.id }}" method="POST" action="{{ url_for('delete_wishlist', item_id=item.id) }}" style="display:inline">
-                                <button type="button" class="btn btn-ghost btn-sm text-danger" onclick="confirmDelete('del-wish-{{ item.id }}', '{{ item.name }}')">✕</button>
+                            <form id="del-wish-d-{{ item.id }}" method="POST" action="{{ url_for('delete_wishlist', item_id=item.id) }}" style="display:inline">
+                                <button type="button" class="btn btn-ghost btn-sm text-danger" onclick="confirmDelete('del-wish-d-{{ item.id }}', '{{ item.name }}')">✕</button>
                             </form>
                         </td>
                     </tr>
                     {% endfor %}
                 </tbody>
             </table>
+
+            <!-- Mobile card list -->
+            <div class="mobile-list mobile-only">
+                {% for item in active %}
+                <div class="mobile-item">
+                    <div class="mobile-item-info">
+                        <div class="mobile-item-name">
+                            {{ item.name }}
+                            <span class="badge badge-{{ item.priority }}" style="margin-left:0.25rem; vertical-align: middle;">{{ item.priority }}</span>
+                        </div>
+                        <div class="mobile-item-meta">
+                            <span class="mobile-item-amount">Rp {{ "{:,.0f}".format(item.price) }}</span>
+                            {% if item.notes %}
+                            <span>· {{ item.notes[:30] }}{% if item.notes|length > 30 %}…{% endif %}</span>
+                            {% endif %}
+                        </div>
+                    </div>
+                    <div class="mobile-item-actions">
+                        <form method="POST" action="{{ url_for('purchase_wishlist', item_id=item.id) }}" style="display:inline">
+                            <button type="submit" class="btn btn-sm btn-secondary" style="min-width:40px; min-height:40px; font-size:1rem;">✓</button>
+                        </form>
+                        <form id="del-wish-m-{{ item.id }}" method="POST" action="{{ url_for('delete_wishlist', item_id=item.id) }}" style="display:inline">
+                            <button type="button" class="btn btn-sm btn-danger" style="min-width:40px; min-height:40px; font-size:1rem;" onclick="confirmDelete('del-wish-m-{{ item.id }}', '{{ item.name }}')">✕</button>
+                        </form>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
             {% else %}
             <div class="empty-state">
                 <div class="icon">✦</div>
                 <p>Your wishlist is empty.</p>
-                <p style="font-size:0.75rem" class="mt-1">Add your first item using the form.</p>
+                <p style="font-size:0.75rem" class="mt-1">Add your first item using the form below.</p>
             </div>
             {% endif %}
         </div>
@@ -82,7 +111,9 @@
             <div class="section-header" style="margin-bottom:1rem;">
                 <h2 class="section-title">Purchased History</h2>
             </div>
-            <table class="data-table">
+
+            <!-- Desktop table -->
+            <table class="data-table desktop-only">
                 <thead>
                     <tr>
                         <th>Item</th>
@@ -101,14 +132,39 @@
                         <td class="amount" style="text-align:right">Rp {{ "{:,.0f}".format(item.price) }}</td>
                         <td style="color:var(--text-muted); font-size:0.78rem;">{{ item.purchased_at or '—' }}</td>
                         <td style="text-align:right">
-                            <form id="del-wish-p-{{ item.id }}" method="POST" action="{{ url_for('delete_wishlist', item_id=item.id) }}" style="display:inline">
-                                <button type="button" class="btn btn-ghost btn-sm text-danger" onclick="confirmDelete('del-wish-p-{{ item.id }}', '{{ item.name }}')">✕</button>
+                            <form id="del-wish-pd-{{ item.id }}" method="POST" action="{{ url_for('delete_wishlist', item_id=item.id) }}" style="display:inline">
+                                <button type="button" class="btn btn-ghost btn-sm text-danger" onclick="confirmDelete('del-wish-pd-{{ item.id }}', '{{ item.name }}')">✕</button>
                             </form>
                         </td>
                     </tr>
                     {% endfor %}
                 </tbody>
             </table>
+
+            <!-- Mobile card list -->
+            <div class="mobile-list mobile-only">
+                {% for item in purchased %}
+                <div class="mobile-item" style="opacity: 0.65;">
+                    <div class="mobile-item-info">
+                        <div class="mobile-item-name" style="text-decoration: line-through; color: var(--text-muted);">
+                            {{ item.name }}
+                            <span class="badge badge-purchased" style="margin-left:0.25rem; vertical-align: middle;">bought</span>
+                        </div>
+                        <div class="mobile-item-meta">
+                            <span>Rp {{ "{:,.0f}".format(item.price) }}</span>
+                            {% if item.purchased_at %}
+                            <span>· {{ item.purchased_at }}</span>
+                            {% endif %}
+                        </div>
+                    </div>
+                    <div class="mobile-item-actions">
+                        <form id="del-wish-pm-{{ item.id }}" method="POST" action="{{ url_for('delete_wishlist', item_id=item.id) }}" style="display:inline">
+                            <button type="button" class="btn btn-sm btn-danger" style="min-width:40px; min-height:40px; font-size:1rem;" onclick="confirmDelete('del-wish-pm-{{ item.id }}', '{{ item.name }}')">✕</button>
+                        </form>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
         </div>
         {% endif %}
     </div>
@@ -125,7 +181,7 @@
                     <label class="form-label" for="wish-name">Item Name</label>
                     <input type="text" name="name" id="wish-name" class="form-input" placeholder="e.g., Mechanical Keyboard" required>
                 </div>
-                <div class="form-row" style="grid-template-columns: 1fr 1fr;">
+                <div class="form-row">
                     <div class="form-group">
                         <label class="form-label" for="wish-price">Estimated Price (Rp)</label>
                         <input type="number" step="0.01" min="0" name="price" id="wish-price" class="form-input" placeholder="0">
