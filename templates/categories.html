@@ -4,14 +4,18 @@
 {% block content %}
 <div class="section-header">
     <h1 class="section-title">Category Management</h1>
-    <span class="text-muted" style="font-size:0.72rem;">{{ categories | length }} categories</span>
+    <span class="text-muted" style="font-size:0.72rem;">{{ categories | length }} expense · {{ income_categories | length }} income</span>
 </div>
 
+<!-- ══════════════════════════════════════════════════════════ -->
+<!-- ── EXPENSE CATEGORIES ── -->
+<!-- ══════════════════════════════════════════════════════════ -->
 <div class="layout-2col">
-    <!-- ── Category List ── -->
+    <!-- ── Expense Category List ── -->
     <div class="card">
         <div class="section-header" style="margin-bottom:1rem;">
-            <h2 class="section-title">All Categories</h2>
+            <h2 class="section-title">Expense Categories</h2>
+            <span class="text-accent" style="font-size:0.72rem;">▸ Spending</span>
         </div>
 
         {% if categories %}
@@ -78,16 +82,16 @@
         {% else %}
         <div class="empty-state">
             <div class="icon">📁</div>
-            <p>No categories found.</p>
+            <p>No expense categories found.</p>
         </div>
         {% endif %}
     </div>
 
-    <!-- ── Add Category Form ── -->
+    <!-- ── Add Expense Category Form ── -->
     <div>
         <div class="card">
             <div class="section-header" style="margin-bottom:1.25rem;">
-                <h2 class="section-title">Add Category</h2>
+                <h2 class="section-title">Add Expense Category</h2>
                 <span class="text-accent" style="font-size:0.72rem;">▸ New</span>
             </div>
             <form method="POST" action="{{ url_for('add_category') }}" id="add-category-form">
@@ -100,13 +104,114 @@
                 </button>
             </form>
         </div>
+    </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<!-- ── INCOME CATEGORIES ── -->
+<!-- ══════════════════════════════════════════════════════════ -->
+<div style="margin-top: 1.5rem;"></div>
+
+<div class="layout-2col">
+    <!-- ── Income Category List ── -->
+    <div class="card">
+        <div class="section-header" style="margin-bottom:1rem;">
+            <h2 class="section-title">Income Sources</h2>
+            <span class="text-success" style="font-size:0.72rem;">▸ Earnings</span>
+        </div>
+
+        {% if income_categories %}
+        <!-- Desktop table -->
+        <table class="data-table desktop-only">
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th style="text-align:center">Entries</th>
+                    <th style="text-align:right">Total Amount</th>
+                    <th style="text-align:right">Action</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for cat in income_categories %}
+                <tr>
+                    <td style="font-weight:600; color: var(--success)">
+                        {{ cat.name }}
+                    </td>
+                    <td style="text-align:center">
+                        <span class="tabular" style="color:var(--text-muted)">{{ cat.income_count }}</span>
+                    </td>
+                    <td class="amount" style="text-align:right; color: var(--success);">
+                        Rp {{ "{:,.0f}".format(cat.total_amount) }}
+                    </td>
+                    <td style="text-align:right">
+                        <form id="del-icat-d-{{ cat.id }}" method="POST" action="{{ url_for('delete_income_category', cat_id=cat.id) }}" style="display:inline">
+                            <button type="button"
+                                    class="btn btn-danger btn-sm"
+                                    onclick="confirmDeleteICat('del-icat-d-{{ cat.id }}', '{{ cat.name }}', {{ cat.income_count }})">
+                                Delete
+                            </button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+
+        <!-- Mobile card list -->
+        <div class="mobile-list mobile-only">
+            {% for cat in income_categories %}
+            <div class="mobile-item" style="border-left: 3px solid var(--success);">
+                <div class="mobile-item-info">
+                    <div class="mobile-item-name" style="color: var(--success);">{{ cat.name }}</div>
+                    <div class="mobile-item-meta">
+                        <span>{{ cat.income_count }} entries</span>
+                        <span>·</span>
+                        <span class="mobile-item-amount" style="color: var(--success);">Rp {{ "{:,.0f}".format(cat.total_amount) }}</span>
+                    </div>
+                </div>
+                <div class="mobile-item-actions">
+                    <form id="del-icat-m-{{ cat.id }}" method="POST" action="{{ url_for('delete_income_category', cat_id=cat.id) }}" style="display:inline">
+                        <button type="button"
+                                class="btn btn-danger btn-sm"
+                                onclick="confirmDeleteICat('del-icat-m-{{ cat.id }}', '{{ cat.name }}', {{ cat.income_count }})">
+                            ✕
+                        </button>
+                    </form>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="empty-state">
+            <div class="icon">💰</div>
+            <p>No income sources found.</p>
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- ── Add Income Category Form ── -->
+    <div>
+        <div class="card">
+            <div class="section-header" style="margin-bottom:1.25rem;">
+                <h2 class="section-title">Add Income Source</h2>
+                <span class="text-success" style="font-size:0.72rem;">▸ New</span>
+            </div>
+            <form method="POST" action="{{ url_for('add_income_category') }}" id="add-income-category-form">
+                <div class="form-group">
+                    <label class="form-label" for="income-name">Source Name</label>
+                    <input type="text" name="name" id="income-name" class="form-input" placeholder="e.g., Rental Income" required>
+                </div>
+                <button type="submit" class="btn btn-primary" style="width:100%; background: var(--success); border-color: var(--success);">
+                    Add Income Source
+                </button>
+            </form>
+        </div>
 
         <div class="card" style="padding:1rem 1.25rem;">
             <div class="stat-label">How Deletion Works</div>
             <p style="font-size:0.78rem; color:var(--text-muted); margin-top:0.5rem; line-height:1.6;">
-                If a category has linked expenses, those expenses will be
-                reassigned to <strong style="color:var(--accent)">Uncategorized</strong>
-                before the category is deleted.
+                Expense categories reassign to <strong style="color:var(--accent)">Uncategorized</strong>.
+                Income sources reassign to <strong style="color:var(--success)">Other</strong>.
             </p>
         </div>
     </div>
@@ -118,6 +223,16 @@ function confirmDeleteCat(formId, catName, expenseCount) {
     let msg = 'Delete category "' + catName + '"?';
     if (expenseCount > 0) {
         msg += '\n\n⚠ This category has ' + expenseCount + ' expense(s).\nThey will be reassigned to "Uncategorized".';
+    }
+    if (confirm(msg)) {
+        document.getElementById(formId).submit();
+    }
+}
+
+function confirmDeleteICat(formId, catName, incomeCount) {
+    let msg = 'Delete income source "' + catName + '"?';
+    if (incomeCount > 0) {
+        msg += '\n\n⚠ This source has ' + incomeCount + ' income entry(s).\nThey will be reassigned to "Other".';
     }
     if (confirm(msg)) {
         document.getElementById(formId).submit();

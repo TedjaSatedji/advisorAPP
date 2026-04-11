@@ -7,33 +7,36 @@
     <div class="stat-card">
         <div class="stat-label">Today's Spending</div>
         <div class="stat-value accent">
-            <span class="currency">Rp</span> {{ "{:,.0f}".format(today_total) }}
+            <span class="currency">Rp</span> {{ "{:,.0f}".format(today_expense) }}
         </div>
         <div class="stat-sub">{{ today_str }}</div>
     </div>
     <div class="stat-card">
-        <div class="stat-label">This Month</div>
-        <div class="stat-value">
-            <span class="currency">Rp</span> {{ "{:,.0f}".format(month_total) }}
+        <div class="stat-label">Today's Income</div>
+        <div class="stat-value text-success">
+            <span class="currency">Rp</span> {{ "{:,.0f}".format(today_income) }}
         </div>
-        <div class="stat-sub">{{ now.strftime('%B %Y') }}</div>
+        <div class="stat-sub">{{ today_str }}</div>
     </div>
     <div class="stat-card">
-        <div class="stat-label">All-Time Total</div>
-        <div class="stat-value">
-            <span class="currency">Rp</span> {{ "{:,.0f}".format(all_time_total) }}
+        <div class="stat-label">This Month (Net)</div>
+        {% set net_month = month_income - month_expense %}
+        <div class="stat-value {% if net_month >= 0 %}text-success{% else %}text-danger{% endif %}">
+            <span class="currency">Rp</span> {{ "{:+,.0f}".format(net_month) }}
         </div>
-        <div class="stat-sub">{{ total_entries }} entries</div>
+        <div class="stat-sub">
+            <span style="color:var(--success)">+{{ "{:,.0f}".format(month_income) }}</span>
+            /
+            <span style="color:var(--danger)">-{{ "{:,.0f}".format(month_expense) }}</span>
+        </div>
     </div>
     <div class="stat-card">
-        <div class="stat-label">Top Category (Month)</div>
-        {% if top_categories %}
-        <div class="stat-value" style="font-size:1.15rem;">{{ top_categories[0].name }}</div>
-        <div class="stat-sub">Rp {{ "{:,.0f}".format(top_categories[0].total) }}</div>
-        {% else %}
-        <div class="stat-value text-muted" style="font-size:1rem;">—</div>
-        <div class="stat-sub">No data yet</div>
-        {% endif %}
+        <div class="stat-label">All-Time (Net)</div>
+        {% set net_all = all_time_income - all_time_expense %}
+        <div class="stat-value {% if net_all >= 0 %}text-success{% else %}text-danger{% endif %}">
+            <span class="currency">Rp</span> {{ "{:+,.0f}".format(net_all) }}
+        </div>
+        <div class="stat-sub">{{ total_entries }} expenses logged</div>
     </div>
 </div>
 
@@ -166,8 +169,11 @@
         </div>
         {% endif %}
 
-        <!-- ── Quick Nav (hidden on mobile since we have bottom nav) ── -->
+        <!-- ── Quick Nav (hidden on mobile) ── -->
         <div class="card desktop-only" style="padding:1rem 1.25rem;">
+            <a href="{{ url_for('income_page') }}" class="btn btn-secondary" style="width:100%; margin-bottom:0.5rem;">
+                💰 Log Income
+            </a>
             <a href="{{ url_for('reports') }}" class="btn btn-secondary" style="width:100%; margin-bottom:0.5rem;">
                 📈 View Full Reports
             </a>

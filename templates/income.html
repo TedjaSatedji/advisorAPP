@@ -1,0 +1,180 @@
+{% extends "base.html" %}
+{% block title %}Income · advisorAPP{% endblock %}
+
+{% block content %}
+<!-- ── Summary Stats ── -->
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-label">Today's Income</div>
+        <div class="stat-value text-success">
+            <span class="currency">Rp</span> {{ "{:,.0f}".format(today_total) }}
+        </div>
+        <div class="stat-sub">{{ today_str }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">This Month</div>
+        <div class="stat-value text-success">
+            <span class="currency">Rp</span> {{ "{:,.0f}".format(month_total) }}
+        </div>
+        <div class="stat-sub">{{ now.strftime('%B %Y') }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">All-Time Income</div>
+        <div class="stat-value">
+            <span class="currency">Rp</span> {{ "{:,.0f}".format(all_time_total) }}
+        </div>
+        <div class="stat-sub">Total received</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Top Source (Month)</div>
+        {% if top_sources %}
+        <div class="stat-value" style="font-size:1.15rem;">{{ top_sources[0].name }}</div>
+        <div class="stat-sub">Rp {{ "{:,.0f}".format(top_sources[0].total) }}</div>
+        {% else %}
+        <div class="stat-value text-muted" style="font-size:1rem;">—</div>
+        <div class="stat-sub">No data yet</div>
+        {% endif %}
+    </div>
+</div>
+
+<div class="layout-2col">
+    <!-- ── Left: Recent Income ── -->
+    <div>
+        <div class="section-header">
+            <h2 class="section-title">Recent Income</h2>
+            <span class="text-muted" style="font-size:0.72rem;">Last 50 entries</span>
+        </div>
+
+        {% if grouped_income %}
+            {% for date_key, entries in grouped_income.items() %}
+            <div class="date-header" style="border-left: 3px solid var(--success); padding-left: 0.75rem;">
+                {{ date_key }}
+                <span style="float:right; color: var(--success);">
+                    + Rp {{ "{:,.0f}".format(entries | sum(attribute='amount')) }}
+                </span>
+            </div>
+
+            <!-- Desktop table -->
+            <table class="data-table mb-2 desktop-only">
+                <thead>
+                    <tr>
+                        <th style="width:30%">Description</th>
+                        <th style="width:20%">Source</th>
+                        <th style="width:25%; text-align:right">Amount</th>
+                        <th style="width:25%; text-align:right">Action</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for e in entries %}
+                    <tr>
+                        <td>{{ e.description or '—' }}</td>
+                        <td><span class="cat-pill" style="border-color: rgba(34,197,94,0.3); color: var(--success);">{{ e.category }}</span></td>
+                        <td class="amount" style="text-align:right; color: var(--success);">+ Rp {{ "{:,.0f}".format(e.amount) }}</td>
+                        <td style="text-align:right">
+                            <form id="del-inc-d-{{ e.id }}" method="POST" action="{{ url_for('delete_income', income_id=e.id) }}" style="display:inline">
+                                <button type="button" class="btn btn-ghost btn-sm text-danger" onclick="confirmDelete('del-inc-d-{{ e.id }}', '{{ e.description or 'this entry' }}')">✕</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+
+            <!-- Mobile card list -->
+            <div class="mobile-list mobile-only mb-2">
+                {% for e in entries %}
+                <div class="mobile-item">
+                    <div class="mobile-item-info">
+                        <div class="mobile-item-name">{{ e.description or '—' }}</div>
+                        <div class="mobile-item-meta">
+                            <span class="cat-pill" style="border-color: rgba(34,197,94,0.3); color: var(--success);">{{ e.category }}</span>
+                        </div>
+                    </div>
+                    <div style="display:flex; align-items:center; gap:0.5rem;">
+                        <span class="mobile-item-amount" style="color: var(--success);">+ Rp {{ "{:,.0f}".format(e.amount) }}</span>
+                        <form id="del-inc-m-{{ e.id }}" method="POST" action="{{ url_for('delete_income', income_id=e.id) }}" style="display:inline">
+                            <button type="button" class="btn btn-ghost btn-sm text-danger" style="min-width:36px; min-height:36px; font-size:0.9rem;" onclick="confirmDelete('del-inc-m-{{ e.id }}', '{{ e.description or 'this entry' }}')">✕</button>
+                        </form>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+            {% endfor %}
+        {% else %}
+            <div class="empty-state">
+                <div class="icon">💰</div>
+                <p>No income recorded yet.</p>
+                <p style="font-size:0.75rem" class="mt-1">Use the form below to log your first income.</p>
+            </div>
+        {% endif %}
+    </div>
+
+    <!-- ── Right: Add Income Form ── -->
+    <div>
+        <div class="card">
+            <div class="section-header" style="margin-bottom:1.25rem;">
+                <h2 class="section-title">Add Income</h2>
+                <span class="text-success" style="font-size:0.72rem;">▸ New</span>
+            </div>
+            <form method="POST" action="{{ url_for('add_income') }}" id="add-income-form">
+                <div class="form-group">
+                    <label class="form-label" for="amount">Amount (Rp)</label>
+                    <input type="number" step="0.01" min="0" name="amount" id="amount" class="form-input" placeholder="0" required>
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="description">Description</label>
+                    <input type="text" name="description" id="description" class="form-input" placeholder="e.g., March salary">
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label" for="date">Date</label>
+                        <input type="date" name="date" id="date" class="form-input" value="{{ today_str }}">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="category_id">Source</label>
+                        <select name="category_id" id="category_id" class="form-select" required>
+                            {% for cat in income_categories %}
+                            <option value="{{ cat.id }}">{{ cat.name }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-primary" style="width:100%; margin-top:0.5rem; background: var(--success); border-color: var(--success);">
+                    Add Income
+                </button>
+            </form>
+        </div>
+
+        <!-- ── Top Sources This Month ── -->
+        {% if top_sources %}
+        <div class="card">
+            <div class="section-header" style="margin-bottom:1rem;">
+                <h2 class="section-title">Sources (Month)</h2>
+            </div>
+            {% set month_max = top_sources[0].total if top_sources else 1 %}
+            {% for src in top_sources %}
+            <div style="margin-bottom:0.75rem;">
+                <div class="flex justify-between mb-1" style="font-size:0.8rem;">
+                    <span>{{ src.name }}</span>
+                    <span class="tabular" style="color: var(--success)">Rp {{ "{:,.0f}".format(src.total) }}</span>
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-fill" style="width: {{ (src.total / month_max * 100) }}%; background: var(--success);"></div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        <!-- ── Quick Nav (hidden on mobile) ── -->
+        <div class="card desktop-only" style="padding:1rem 1.25rem;">
+            <a href="{{ url_for('dashboard') }}" class="btn btn-secondary" style="width:100%; margin-bottom:0.5rem;">
+                ◈ Back to Dashboard
+            </a>
+            <a href="{{ url_for('reports') }}" class="btn btn-secondary" style="width:100%;">
+                📈 View Full Reports
+            </a>
+        </div>
+    </div>
+</div>
+{% endblock %}

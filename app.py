@@ -74,13 +74,39 @@ def init_db():
             created_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
             purchased_at TEXT   DEFAULT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS income_categories (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT    NOT NULL UNIQUE,
+            created_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+        );
+
+        CREATE TABLE IF NOT EXISTS income (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            amount          REAL    NOT NULL,
+            description     TEXT    NOT NULL DEFAULT '',
+            date            TEXT    NOT NULL,
+            category_id     INTEGER NOT NULL,
+            created_at      TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
+            FOREIGN KEY (category_id) REFERENCES income_categories(id)
+        );
     """)
 
-    # Seed default categories
+    # Seed default expense categories
     cursor = db.execute("SELECT COUNT(*) FROM categories")
     if cursor.fetchone()[0] == 0:
         db.execute("INSERT INTO categories (name) VALUES ('Makanan')")
         db.execute("INSERT INTO categories (name) VALUES ('Minuman')")
+        db.commit()
+
+    # Seed default income categories
+    cursor = db.execute("SELECT COUNT(*) FROM income_categories")
+    if cursor.fetchone()[0] == 0:
+        db.execute("INSERT INTO income_categories (name) VALUES ('Bank')")
+        db.execute("INSERT INTO income_categories (name) VALUES ('Cash')")
+        db.execute("INSERT INTO income_categories (name) VALUES ('Stocks Dividend')")
+        db.execute("INSERT INTO income_categories (name) VALUES ('Salary')")
+        db.execute("INSERT INTO income_categories (name) VALUES ('Freelance')")
         db.commit()
 
     db.close()
@@ -105,31 +131,47 @@ def dashboard():
     today_str = date.today().isoformat()
     month_start = date.today().replace(day=1).isoformat()
 
-    # Today's total
+    # --- Expense totals ---
     row = db.execute(
         "SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE date = ?",
         (today_str,)
     ).fetchone()
-    today_total = row["total"]
+    today_expense = row["total"]
 
-    # This month's total
     row = db.execute(
         "SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE date >= ?",
         (month_start,)
     ).fetchone()
-    month_total = row["total"]
+    month_expense = row["total"]
 
-    # All-time total
     row = db.execute(
         "SELECT COALESCE(SUM(amount), 0) AS total FROM expenses"
     ).fetchone()
-    all_time_total = row["total"]
+    all_time_expense = row["total"]
+
+    # --- Income totals ---
+    row = db.execute(
+        "SELECT COALESCE(SUM(amount), 0) AS total FROM income WHERE date = ?",
+        (today_str,)
+    ).fetchone()
+    today_income = row["total"]
+
+    row = db.execute(
+        "SELECT COALESCE(SUM(amount), 0) AS total FROM income WHERE date >= ?",
+        (month_start,)
+    ).fetchone()
+    month_income = row["total"]
+
+    row = db.execute(
+        "SELECT COALESCE(SUM(amount), 0) AS total FROM income"
+    ).fetchone()
+    all_time_income = row["total"]
 
     # Total entries
     row = db.execute("SELECT COUNT(*) AS cnt FROM expenses").fetchone()
     total_entries = row["cnt"]
 
-    # Recent expenses grouped by date (last 30 entries)
+    # Recent expenses grouped by date (last 50 entries)
     expenses = db.execute("""
         SELECT e.id, e.amount, e.description, e.date, c.name AS category
         FROM expenses e
@@ -164,9 +206,12 @@ def dashboard():
 
     return render_template(
         "dashboard.html",
-        today_total=today_total,
-        month_total=month_total,
-        all_time_total=all_time_total,
+        today_expense=today_expense,
+        month_expense=month_expense,
+        all_time_expense=all_time_expense,
+        today_income=today_income,
+        month_income=month_income,
+        all_time_income=all_time_income,
         total_entries=total_entries,
         grouped_expenses=grouped,
         categories=categories,
@@ -216,6 +261,115 @@ def delete_expense(expense_id):
 
 
 # ---------------------------------------------------------------------------
+# Routes — Income
+# ---------------------------------------------------------------------------
+
+@app.route("/income")
+def income_page():
+    db = get_db()
+    today_str = date.today().isoformat()
+    month_start = date.today().replace(day=1).isoformat()
+
+    # Stats
+    row = db.execute(
+        "SELECT COALESCE(SUM(amount), 0) AS total FROM income WHERE date = ?",
+        (today_str,)
+    ).fetchone()
+    today_total = row["total"]
+
+    row = db.execute(
+        "SELECT COALESCE(SUM(amount), 0) AS total FROM income WHERE date >= ?",
+        (month_start,)
+    ).fetchone()
+    month_total = row["total"]
+
+    row = db.execute(
+        "SELECT COALESCE(SUM(amount), 0) AS total FROM income"
+    ).fetchone()
+    all_time_total = row["total"]
+
+    # Recent income entries
+    entries = db.execute("""
+        SELECT i.id, i.amount, i.description, i.date, ic.name AS category
+        FROM income i
+        JOIN income_categories ic ON i.category_id = ic.id
+        ORDER BY i.date DESC, i.created_at DESC
+        LIMIT 50
+    """).fetchall()
+
+    # Group by date
+    grouped = {}
+    for entry in entries:
+        d = entry["date"]
+        if d not in grouped:
+            grouped[d] = []
+        grouped[d].append(entry)
+
+    # Income categories for the form
+    income_cats = db.execute(
+        "SELECT id, name FROM income_categories ORDER BY name"
+    ).fetchall()
+
+    # Top income sources this month
+    top_sources = db.execute("""
+        SELECT ic.name, COALESCE(SUM(i.amount), 0) AS total
+        FROM income i
+        JOIN income_categories ic ON i.category_id = ic.id
+        WHERE i.date >= ?
+        GROUP BY ic.name
+        ORDER BY total DESC
+        LIMIT 5
+    """, (month_start,)).fetchall()
+
+    return render_template(
+        "income.html",
+        today_total=today_total,
+        month_total=month_total,
+        all_time_total=all_time_total,
+        grouped_income=grouped,
+        income_categories=income_cats,
+        top_sources=top_sources,
+        today_str=today_str,
+    )
+
+
+@app.route("/income/add", methods=["POST"])
+def add_income():
+    amount = request.form.get("amount", "").strip()
+    description = request.form.get("description", "").strip()
+    income_date = request.form.get("date", date.today().isoformat()).strip()
+    category_id = request.form.get("category_id", "").strip()
+
+    if not amount or not category_id:
+        flash("Amount and source are required.", "error")
+        return redirect(url_for("income_page"))
+
+    try:
+        amount = float(amount)
+    except ValueError:
+        flash("Invalid amount.", "error")
+        return redirect(url_for("income_page"))
+
+    db = get_db()
+    db.execute(
+        "INSERT INTO income (amount, description, date, category_id) VALUES (?, ?, ?, ?)",
+        (amount, description, income_date, int(category_id))
+    )
+    db.commit()
+    flash("Income added.", "success")
+    return redirect(url_for("income_page"))
+
+
+@app.route("/income/delete/<int:income_id>", methods=["POST"])
+def delete_income(income_id):
+    db = get_db()
+    db.execute("DELETE FROM income WHERE id = ?", (income_id,))
+    db.commit()
+    flash("Income entry deleted.", "success")
+    return redirect(url_for("income_page"))
+
+
+# ---------------------------------------------------------------------------
 # Routes — Reports
 # ---------------------------------------------------------------------------
 
@@ -227,6 +381,7 @@ def reports():
 
     results = []
     range_total = 0
+    range_income = 0
 
     if from_date and to_date:
         results = db.execute("""
@@ -243,14 +398,46 @@ def reports():
         ).fetchone()
         range_total = row["total"]
 
-    # Monthly breakdown (last 12 months)
-    monthly = db.execute("""
+        row = db.execute(
+            "SELECT COALESCE(SUM(amount), 0) AS total FROM income WHERE date >= ? AND date <= ?",
+            (from_date, to_date)
+        ).fetchone()
+        range_income = row["total"]
+
+    # Monthly breakdown (last 12 months) — expenses
+    monthly_expenses = db.execute("""
         SELECT strftime('%Y-%m', date) AS month, SUM(amount) AS total
         FROM expenses
         GROUP BY month
         ORDER BY month DESC
         LIMIT 12
     """).fetchall()
+
+    # Monthly breakdown — income
+    monthly_income = db.execute("""
+        SELECT strftime('%Y-%m', date) AS month, SUM(amount) AS total
+        FROM income
+        GROUP BY month
+        ORDER BY month DESC
+        LIMIT 12
+    """).fetchall()
+
+    # Merge monthly data
+    income_map = {m["month"]: m["total"] for m in monthly_income}
+    months_set = set()
+    for m in monthly_expenses:
+        months_set.add(m["month"])
+    for m in monthly_income:
+        months_set.add(m["month"])
+
+    expense_map = {m["month"]: m["total"] for m in monthly_expenses}
+    monthly_merged = []
+    for month in sorted(months_set, reverse=True)[:12]:
+        monthly_merged.append({
+            "month": month,
+            "expense": expense_map.get(month, 0),
+            "income": income_map.get(month, 0),
+        })
 
     # Category breakdown (all time)
     by_category = db.execute("""
@@ -261,9 +448,17 @@ def reports():
         ORDER BY total DESC
     """).fetchall()
 
+    # Income source breakdown (all time)
+    by_source = db.execute("""
+        SELECT ic.name, COALESCE(SUM(i.amount), 0) AS total, COUNT(i.id) AS count
+        FROM income i
+        JOIN income_categories ic ON i.category_id = ic.id
+        GROUP BY ic.name
+        ORDER BY total DESC
+    """).fetchall()
+
     # Daily average this month
     month_start = date.today().replace(day=1).isoformat()
-    today_str = date.today().isoformat()
     row = db.execute("""
         SELECT COALESCE(SUM(amount), 0) AS total,
                COUNT(DISTINCT date) AS days
@@ -277,14 +472,16 @@ def reports():
         to_date=to_date,
         results=results,
         range_total=range_total,
-        monthly=monthly,
+        range_income=range_income,
+        monthly=monthly_merged,
         by_category=by_category,
+        by_source=by_source,
         daily_avg=daily_avg,
     )
 
 
 # ---------------------------------------------------------------------------
-# Routes — Categories
+# Routes — Categories (Expense)
 # ---------------------------------------------------------------------------
 
 @app.route("/categories")
@@ -299,7 +496,19 @@ def categories():
         GROUP BY c.id
         ORDER BY c.name
     """).fetchall()
-    return render_template("categories.html", categories=cats)
+
+    # Income categories
+    income_cats = db.execute("""
+        SELECT ic.id, ic.name, ic.created_at,
+               COUNT(i.id) AS income_count,
+               COALESCE(SUM(i.amount), 0) AS total_amount
+        FROM income_categories ic
+        LEFT JOIN income i ON ic.id = i.category_id
+        GROUP BY ic.id
+        ORDER BY ic.name
+    """).fetchall()
+
+    return render_template("categories.html", categories=cats, income_categories=income_cats)
 
 
 @app.route("/categories/add", methods=["POST"])
@@ -347,6 +556,58 @@ def delete_category(cat_id):
     db.execute("DELETE FROM categories WHERE id = ?", (cat_id,))
     db.commit()
     flash("Category deleted.", "success")
+    return redirect(url_for("categories"))
+
+
+# ---------------------------------------------------------------------------
+# Routes — Income Categories
+# ---------------------------------------------------------------------------
+
+@app.route("/income-categories/add", methods=["POST"])
+def add_income_category():
+    name = request.form.get("name", "").strip()
+    if not name:
+        flash("Category name is required.", "error")
+        return redirect(url_for("categories"))
+
+    db = get_db()
+    try:
+        db.execute("INSERT INTO income_categories (name) VALUES (?)", (name,))
+        db.commit()
+        flash(f"Income source '{name}' added.", "success")
+    except sqlite3.IntegrityError:
+        flash(f"Income source '{name}' already exists.", "error")
+    return redirect(url_for("categories"))
+
+
+@app.route("/income-categories/delete/<int:cat_id>", methods=["POST"])
+def delete_income_category(cat_id):
+    db = get_db()
+
+    # Check if category has income entries
+    row = db.execute(
+        "SELECT COUNT(*) AS cnt FROM income WHERE category_id = ?", (cat_id,)
+    ).fetchone()
+
+    if row["cnt"] > 0:
+        # Reassign to "Other" — create it if needed
+        unc = db.execute(
+            "SELECT id FROM income_categories WHERE name = 'Other'"
+        ).fetchone()
+        if unc is None:
+            db.execute("INSERT INTO income_categories (name) VALUES ('Other')")
+            db.commit()
+            unc = db.execute(
+                "SELECT id FROM income_categories WHERE name = 'Other'"
+            ).fetchone()
+        db.execute(
+            "UPDATE income SET category_id = ? WHERE category_id = ?",
+            (unc["id"], cat_id)
+        )
+
+    db.execute("DELETE FROM income_categories WHERE id = ?", (cat_id,))
+    db.commit()
+    flash("Income source deleted.", "success")
     return redirect(url_for("categories"))
 
 

@@ -863,6 +863,7 @@
             </a>
             <ul class="nav-links" id="nav-links">
                 <li><a href="{{ url_for('dashboard') }}" class="{% if request.endpoint == 'dashboard' %}active{% endif %}">Dashboard</a></li>
+                <li><a href="{{ url_for('income_page') }}" class="{% if request.endpoint == 'income_page' %}active{% endif %}">Income</a></li>
                 <li><a href="{{ url_for('reports') }}" class="{% if request.endpoint == 'reports' %}active{% endif %}">Reports</a></li>
                 <li><a href="{{ url_for('categories') }}" class="{% if request.endpoint == 'categories' %}active{% endif %}">Categories</a></li>
                 <li><a href="{{ url_for('wishlist') }}" class="{% if request.endpoint == 'wishlist' %}active{% endif %}">Wishlist</a></li>
@@ -900,6 +901,10 @@
             <a href="{{ url_for('dashboard') }}" class="{% if request.endpoint == 'dashboard' %}active{% endif %}">
                 <span class="nav-icon">◈</span>
                 Home
+            </a>
+            <a href="{{ url_for('income_page') }}" class="{% if request.endpoint == 'income_page' %}active{% endif %}">
+                <span class="nav-icon">▲</span>
+                Income
             </a>
             <a href="{{ url_for('reports') }}" class="{% if request.endpoint == 'reports' %}active{% endif %}">
                 <span class="nav-icon">▤</span>
