@@ -1,0 +1,7 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* advisorAPP — Tailwind input source */
+/* The base.html includes all custom CSS inline for zero-dependency rendering. */
+/* This file exists as the Tailwind CLI source entry point. */

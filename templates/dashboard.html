@@ -1,0 +1,158 @@
+{% extends "base.html" %}
+{% block title %}Dashboard · advisorAPP{% endblock %}
+
+{% block content %}
+<!-- ── Summary Stats ── -->
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-label">Today's Spending</div>
+        <div class="stat-value accent">
+            <span class="currency">Rp</span> {{ "{:,.0f}".format(today_total) }}
+        </div>
+        <div class="stat-sub">{{ today_str }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">This Month</div>
+        <div class="stat-value">
+            <span class="currency">Rp</span> {{ "{:,.0f}".format(month_total) }}
+        </div>
+        <div class="stat-sub">{{ now.strftime('%B %Y') }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">All-Time Total</div>
+        <div class="stat-value">
+            <span class="currency">Rp</span> {{ "{:,.0f}".format(all_time_total) }}
+        </div>
+        <div class="stat-sub">{{ total_entries }} entries</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Top Category (Month)</div>
+        {% if top_categories %}
+        <div class="stat-value" style="font-size:1.15rem;">{{ top_categories[0].name }}</div>
+        <div class="stat-sub">Rp {{ "{:,.0f}".format(top_categories[0].total) }}</div>
+        {% else %}
+        <div class="stat-value text-muted" style="font-size:1rem;">—</div>
+        <div class="stat-sub">No data yet</div>
+        {% endif %}
+    </div>
+</div>
+
+<div class="layout-2col">
+    <!-- ── Left: Recent Expenses ── -->
+    <div>
+        <div class="section-header">
+            <h2 class="section-title">Recent Expenses</h2>
+            <span class="text-muted" style="font-size:0.72rem;">Last 50 entries</span>
+        </div>
+
+        {% if grouped_expenses %}
+            {% for date_key, entries in grouped_expenses.items() %}
+            <div class="date-header">
+                {{ date_key }}
+                <span style="float:right; color: var(--text-secondary);">
+                    Rp {{ "{:,.0f}".format(entries | sum(attribute='amount')) }}
+                </span>
+            </div>
+            <table class="data-table mb-2">
+                <thead>
+                    <tr>
+                        <th style="width:30%">Description</th>
+                        <th style="width:20%">Category</th>
+                        <th style="width:25%; text-align:right">Amount</th>
+                        <th style="width:25%; text-align:right">Action</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for e in entries %}
+                    <tr>
+                        <td>{{ e.description or '—' }}</td>
+                        <td><span class="cat-pill">{{ e.category }}</span></td>
+                        <td class="amount" style="text-align:right">Rp {{ "{:,.0f}".format(e.amount) }}</td>
+                        <td style="text-align:right">
+                            <form id="del-exp-{{ e.id }}" method="POST" action="{{ url_for('delete_expense', expense_id=e.id) }}" style="display:inline">
+                                <button type="button" class="btn btn-ghost btn-sm text-danger" onclick="confirmDelete('del-exp-{{ e.id }}', '{{ e.description or 'this expense' }}')">✕</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% endfor %}
+        {% else %}
+            <div class="empty-state">
+                <div class="icon">📊</div>
+                <p>No expenses recorded yet.</p>
+                <p style="font-size:0.75rem" class="mt-1">Use the form on the right to add your first entry.</p>
+            </div>
+        {% endif %}
+    </div>
+
+    <!-- ── Right: Add Expense Form ── -->
+    <div>
+        <div class="card">
+            <div class="section-header" style="margin-bottom:1.25rem;">
+                <h2 class="section-title">Add Expense</h2>
+                <span class="text-accent" style="font-size:0.72rem;">▸ New</span>
+            </div>
+            <form method="POST" action="{{ url_for('add_expense') }}" id="add-expense-form">
+                <div class="form-group">
+                    <label class="form-label" for="amount">Amount (Rp)</label>
+                    <input type="number" step="0.01" min="0" name="amount" id="amount" class="form-input" placeholder="0" required>
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="description">Description</label>
+                    <input type="text" name="description" id="description" class="form-input" placeholder="What did you spend on?">
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label" for="date">Date</label>
+                        <input type="date" name="date" id="date" class="form-input" value="{{ today_str }}">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="category_id">Category</label>
+                        <select name="category_id" id="category_id" class="form-select" required>
+                            {% for cat in categories %}
+                            <option value="{{ cat.id }}">{{ cat.name }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-primary" style="width:100%; margin-top:0.5rem;">
+                    Add Expense
+                </button>
+            </form>
+        </div>
+
+        <!-- ── Top Categories This Month ── -->
+        {% if top_categories %}
+        <div class="card">
+            <div class="section-header" style="margin-bottom:1rem;">
+                <h2 class="section-title">Categories (Month)</h2>
+            </div>
+            {% set month_max = top_categories[0].total if top_categories else 1 %}
+            {% for cat in top_categories %}
+            <div style="margin-bottom:0.75rem;">
+                <div class="flex justify-between mb-1" style="font-size:0.8rem;">
+                    <span>{{ cat.name }}</span>
+                    <span class="tabular" style="color:var(--text-secondary)">Rp {{ "{:,.0f}".format(cat.total) }}</span>
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-fill" style="width: {{ (cat.total / month_max * 100) }}%"></div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        <!-- ── Quick Nav ── -->
+        <div class="card" style="padding:1rem 1.25rem;">
+            <a href="{{ url_for('reports') }}" class="btn btn-secondary" style="width:100%; margin-bottom:0.5rem;">
+                📈 View Full Reports
+            </a>
+            <a href="{{ url_for('wishlist') }}" class="btn btn-secondary" style="width:100%;">
+                ✦ Manage Wishlist
+            </a>
+        </div>
+    </div>
+</div>
+{% endblock %}

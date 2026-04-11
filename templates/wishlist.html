@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+{% block title %}Wishlist · advisorAPP{% endblock %}
+
+{% block content %}
+<div class="section-header">
+    <h1 class="section-title">Wishlist</h1>
+    <span class="text-muted" style="font-size:0.72rem;">{{ active | length }} active · {{ purchased | length }} purchased</span>
+</div>
+
+<!-- ── Stats Row ── -->
+<div class="stats-grid" style="grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); margin-bottom:1.5rem;">
+    <div class="stat-card">
+        <div class="stat-label">Wishlist Total</div>
+        <div class="stat-value accent" style="font-size:1.4rem;">
+            <span class="currency">Rp</span> {{ "{:,.0f}".format(total_wishlist) }}
+        </div>
+        <div class="stat-sub">{{ active | length }} items pending</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Already Purchased</div>
+        <div class="stat-value" style="font-size:1.4rem;">
+            <span class="currency">Rp</span> {{ "{:,.0f}".format(total_purchased) }}
+        </div>
+        <div class="stat-sub">{{ purchased | length }} items bought</div>
+    </div>
+</div>
+
+<div class="layout-2col" style="grid-template-columns: 1fr 380px;">
+    <!-- ── Active Wishlist ── -->
+    <div>
+        <div class="card">
+            <div class="section-header" style="margin-bottom:1rem;">
+                <h2 class="section-title">Active Items</h2>
+            </div>
+
+            {% if active %}
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>Item</th>
+                        <th>Priority</th>
+                        <th style="text-align:right">Est. Price</th>
+                        <th>Notes</th>
+                        <th style="text-align:right">Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for item in active %}
+                    <tr>
+                        <td style="font-weight:600; color:var(--text-primary)">{{ item.name }}</td>
+                        <td>
+                            <span class="badge badge-{{ item.priority }}">{{ item.priority }}</span>
+                        </td>
+                        <td class="amount" style="text-align:right">Rp {{ "{:,.0f}".format(item.price) }}</td>
+                        <td style="color:var(--text-muted); font-size:0.78rem; max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
+                            {{ item.notes or '—' }}
+                        </td>
+                        <td style="text-align:right; white-space:nowrap;">
+                            <form method="POST" action="{{ url_for('purchase_wishlist', item_id=item.id) }}" style="display:inline">
+                                <button type="submit" class="btn btn-sm btn-secondary tooltip" data-tip="Mark purchased">✓</button>
+                            </form>
+                            <form id="del-wish-{{ item.id }}" method="POST" action="{{ url_for('delete_wishlist', item_id=item.id) }}" style="display:inline">
+                                <button type="button" class="btn btn-ghost btn-sm text-danger" onclick="confirmDelete('del-wish-{{ item.id }}', '{{ item.name }}')">✕</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <div class="empty-state">
+                <div class="icon">✦</div>
+                <p>Your wishlist is empty.</p>
+                <p style="font-size:0.75rem" class="mt-1">Add your first item using the form.</p>
+            </div>
+            {% endif %}
+        </div>
+
+        <!-- ── Purchased History ── -->
+        {% if purchased %}
+        <div class="card">
+            <div class="section-header" style="margin-bottom:1rem;">
+                <h2 class="section-title">Purchased History</h2>
+            </div>
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>Item</th>
+                        <th style="text-align:right">Price</th>
+                        <th>Purchased</th>
+                        <th style="text-align:right">Action</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for item in purchased %}
+                    <tr>
+                        <td>
+                            <span style="color:var(--text-muted); text-decoration: line-through;">{{ item.name }}</span>
+                            <span class="badge badge-purchased" style="margin-left:0.3rem;">bought</span>
+                        </td>
+                        <td class="amount" style="text-align:right">Rp {{ "{:,.0f}".format(item.price) }}</td>
+                        <td style="color:var(--text-muted); font-size:0.78rem;">{{ item.purchased_at or '—' }}</td>
+                        <td style="text-align:right">
+                            <form id="del-wish-p-{{ item.id }}" method="POST" action="{{ url_for('delete_wishlist', item_id=item.id) }}" style="display:inline">
+                                <button type="button" class="btn btn-ghost btn-sm text-danger" onclick="confirmDelete('del-wish-p-{{ item.id }}', '{{ item.name }}')">✕</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- ── Add Wishlist Item Form ── -->
+    <div>
+        <div class="card">
+            <div class="section-header" style="margin-bottom:1.25rem;">
+                <h2 class="section-title">Add to Wishlist</h2>
+                <span class="text-accent" style="font-size:0.72rem;">▸ New</span>
+            </div>
+            <form method="POST" action="{{ url_for('add_wishlist') }}" id="add-wishlist-form">
+                <div class="form-group">
+                    <label class="form-label" for="wish-name">Item Name</label>
+                    <input type="text" name="name" id="wish-name" class="form-input" placeholder="e.g., Mechanical Keyboard" required>
+                </div>
+                <div class="form-row" style="grid-template-columns: 1fr 1fr;">
+                    <div class="form-group">
+                        <label class="form-label" for="wish-price">Estimated Price (Rp)</label>
+                        <input type="number" step="0.01" min="0" name="price" id="wish-price" class="form-input" placeholder="0">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="wish-priority">Priority</label>
+                        <select name="priority" id="wish-priority" class="form-select">
+                            <option value="low">Low</option>
+                            <option value="medium" selected>Medium</option>
+                            <option value="high">High</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="wish-notes">Notes (optional)</label>
+                    <textarea name="notes" id="wish-notes" class="form-textarea" placeholder="Any additional notes..."></textarea>
+                </div>
+                <button type="submit" class="btn btn-primary" style="width:100%;">
+                    Add to Wishlist
+                </button>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}
