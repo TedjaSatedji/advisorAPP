@@ -1,0 +1,562 @@
+{% extends "base.html" %}
+{% block title %}{{ date_str }} · Ledger · advisorAPP{% endblock %}
+
+{% block content %}
+<!-- ── Back to Ledger ── -->
+<div style="margin-bottom:1rem;">
+    <a href="{{ url_for('ledger') }}" class="btn btn-ghost" style="padding:0.3rem 0; color:var(--text-muted); font-size:0.8rem;">
+        ‹ Back to Ledger
+    </a>
+</div>
+
+<!-- ── Day Header ── -->
+{% set parts = date_str.split('-') %}
+<div class="day-hero">
+    <div class="day-hero-date">
+        <span class="day-hero-num">{{ parts[2]|int }}-{{ parts[1]|int }}-{{ parts[0] }}</span>
+    </div>
+    <div class="day-hero-stats">
+        <div class="day-hero-stat">
+            <span class="day-hero-label">Income</span>
+            <span class="day-hero-value text-success">+Rp {{ "{:,.0f}".format(income_total) }}</span>
+        </div>
+        <div class="day-hero-stat">
+            <span class="day-hero-label">Expenses</span>
+            <span class="day-hero-value text-danger">-Rp {{ "{:,.0f}".format(expense_total) }}</span>
+        </div>
+        <div class="day-hero-stat">
+            <span class="day-hero-label">Net</span>
+            {% set net = income_total - expense_total %}
+            <span class="day-hero-value {% if net >= 0 %}text-success{% else %}text-danger{% endif %}">
+                Rp {{ "{:+,.0f}".format(net) }}
+            </span>
+        </div>
+    </div>
+</div>
+
+<!-- ── Tree View ── -->
+<div class="tree-container">
+    <!-- Tree trunk line -->
+    <div class="tree-trunk"></div>
+
+    <!-- Incomes Branch -->
+    <div class="tree-branch">
+        <div class="tree-branch-header">
+            <div class="tree-connector">
+                <div class="tree-h-line"></div>
+            </div>
+            <div class="tree-branch-label income-label">
+                <span class="tree-icon">▲</span>
+                Incomes
+                <span class="tree-branch-total">Rp {{ "{:,.0f}".format(income_total) }}</span>
+            </div>
+        </div>
+
+        {% if income_entries %}
+        <div class="tree-items">
+            {% for e in income_entries %}
+            <div class="tree-item" data-id="{{ e.id }}" data-type="income">
+                <div class="tree-item-connector">
+                    <div class="tree-sub-line"></div>
+                    <div class="tree-sub-h-line"></div>
+                </div>
+                <div class="tree-item-content">
+                    <div class="tree-item-main">
+                        <span class="tree-item-amount text-success">Rp {{ "{:,.0f}".format(e.amount) }}</span>
+                        <span class="tree-item-sep">—</span>
+                        <span class="tree-item-cat">{{ e.category }}</span>
+                        {% if e.description %}
+                        <span class="tree-item-desc">({{ e.description }})</span>
+                        {% endif %}
+                    </div>
+                    <div class="tree-item-actions">
+                        <button type="button" class="btn btn-ghost btn-sm" onclick="openEditModal('income', {{ e.id }}, {{ e.amount }}, '{{ e.description|replace("'", "\\'") }}', '{{ e.date }}', {{ e.category_id }})" title="Edit">
+                            ✎
+                        </button>
+                        <form id="del-inc-{{ e.id }}" method="POST" action="{{ url_for('delete_income', income_id=e.id) }}" style="display:inline">
+                            <input type="hidden" name="redirect_to" value="{{ url_for('ledger_day', date_str=date_str) }}">
+                            <button type="button" class="btn btn-ghost btn-sm text-danger" onclick="confirmDelete('del-inc-{{ e.id }}', '{{ e.description or 'this income' }}')" title="Delete">✕</button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="tree-items">
+            <div class="tree-item">
+                <div class="tree-item-connector">
+                    <div class="tree-sub-line" style="height:50%;"></div>
+                    <div class="tree-sub-h-line"></div>
+                </div>
+                <div class="tree-item-content">
+                    <span class="text-muted" style="font-size:0.8rem; font-style:italic;">No income this day</span>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- Expenses Branch -->
+    <div class="tree-branch last-branch">
+        <div class="tree-branch-header">
+            <div class="tree-connector last">
+                <div class="tree-h-line"></div>
+            </div>
+            <div class="tree-branch-label expense-label">
+                <span class="tree-icon">▼</span>
+                Expenses
+                <span class="tree-branch-total">Rp {{ "{:,.0f}".format(expense_total) }}</span>
+            </div>
+        </div>
+
+        {% if expense_entries %}
+        <div class="tree-items">
+            {% for e in expense_entries %}
+            <div class="tree-item {% if loop.last %}last-item{% endif %}" data-id="{{ e.id }}" data-type="expense">
+                <div class="tree-item-connector">
+                    <div class="tree-sub-line {% if loop.last %}half{% endif %}"></div>
+                    <div class="tree-sub-h-line"></div>
+                </div>
+                <div class="tree-item-content">
+                    <div class="tree-item-main">
+                        <span class="tree-item-amount">Rp {{ "{:,.0f}".format(e.amount) }}</span>
+                        <span class="tree-item-sep">—</span>
+                        <span class="tree-item-cat">{{ e.category }}</span>
+                        {% if e.description %}
+                        <span class="tree-item-desc">({{ e.description }})</span>
+                        {% endif %}
+                    </div>
+                    <div class="tree-item-actions">
+                        <button type="button" class="btn btn-ghost btn-sm" onclick="openEditModal('expense', {{ e.id }}, {{ e.amount }}, '{{ e.description|replace("'", "\\'") }}', '{{ e.date }}', {{ e.category_id }})" title="Edit">
+                            ✎
+                        </button>
+                        <form id="del-exp-{{ e.id }}" method="POST" action="{{ url_for('delete_expense', expense_id=e.id) }}" style="display:inline">
+                            <input type="hidden" name="redirect_to" value="{{ url_for('ledger_day', date_str=date_str) }}">
+                            <button type="button" class="btn btn-ghost btn-sm text-danger" onclick="confirmDelete('del-exp-{{ e.id }}', '{{ e.description or 'this expense' }}')" title="Delete">✕</button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="tree-items">
+            <div class="tree-item last-item">
+                <div class="tree-item-connector">
+                    <div class="tree-sub-line half"></div>
+                    <div class="tree-sub-h-line"></div>
+                </div>
+                <div class="tree-item-content">
+                    <span class="text-muted" style="font-size:0.8rem; font-style:italic;">No expenses this day</span>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<!-- ── Edit Modal ── -->
+<div class="confirm-overlay" id="edit-modal">
+    <div class="confirm-box" style="text-align:left; max-width:440px;">
+        <h3 id="edit-modal-title" style="margin-bottom:1rem;">Edit Entry</h3>
+        <form id="edit-form" method="POST" action="">
+            <input type="hidden" name="redirect_to" id="edit-redirect" value="{{ url_for('ledger_day', date_str=date_str) }}">
+            <div class="form-group">
+                <label class="form-label" for="edit-amount">Amount (Rp)</label>
+                <input type="number" step="0.01" min="0" name="amount" id="edit-amount" class="form-input" required>
+            </div>
+            <div class="form-group">
+                <label class="form-label" for="edit-description">Description</label>
+                <input type="text" name="description" id="edit-description" class="form-input">
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label class="form-label" for="edit-date">Date</label>
+                    <input type="date" name="date" id="edit-date" class="form-input">
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="edit-category">Category</label>
+                    <select name="category_id" id="edit-category" class="form-select" required>
+                    </select>
+                </div>
+            </div>
+            <div class="confirm-actions" style="margin-top:1.25rem;">
+                <button type="button" class="btn btn-secondary" onclick="closeEditModal()">Cancel</button>
+                <button type="submit" class="btn btn-primary">Save Changes</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<style>
+    /* ── Day Hero ── */
+    .day-hero {
+        margin-bottom: 2rem;
+    }
+
+    .day-hero-date {
+        margin-bottom: 1rem;
+    }
+
+    .day-hero-num {
+        font-size: 2.5rem;
+        font-weight: 800;
+        letter-spacing: -0.04em;
+        color: var(--text-primary);
+        line-height: 1;
+    }
+
+    .day-hero-stats {
+        display: flex;
+        gap: 2rem;
+        flex-wrap: wrap;
+    }
+
+    .day-hero-stat {
+        display: flex;
+        flex-direction: column;
+        gap: 0.2rem;
+    }
+
+    .day-hero-label {
+        font-size: 0.65rem;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        font-weight: 600;
+    }
+
+    .day-hero-value {
+        font-size: 1.15rem;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+    }
+
+    /* ── Tree Structure ── */
+    .tree-container {
+        position: relative;
+        padding-left: 2rem;
+        margin-bottom: 2rem;
+    }
+
+    .tree-trunk {
+        position: absolute;
+        left: 0.75rem;
+        top: 0;
+        bottom: 0;
+        width: 2px;
+        background: var(--border-light);
+    }
+
+    /* Branch */
+    .tree-branch {
+        margin-bottom: 1.5rem;
+    }
+
+    .tree-branch.last-branch {
+        margin-bottom: 0;
+    }
+
+    .tree-branch-header {
+        display: flex;
+        align-items: center;
+        position: relative;
+        margin-bottom: 0.5rem;
+    }
+
+    .tree-connector {
+        position: absolute;
+        left: -2rem;
+        width: 2rem;
+        height: 100%;
+        display: flex;
+        align-items: center;
+    }
+
+    .tree-h-line {
+        width: 100%;
+        height: 2px;
+        background: var(--border-light);
+    }
+
+    .tree-branch-label {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-weight: 700;
+        font-size: 1.05rem;
+        color: var(--text-primary);
+        padding: 0.4rem 0;
+    }
+
+    .tree-branch-label .tree-icon {
+        font-size: 0.7rem;
+    }
+
+    .income-label .tree-icon { color: var(--success); }
+    .expense-label .tree-icon { color: var(--danger); }
+
+    .tree-branch-total {
+        font-size: 0.75rem;
+        color: var(--text-muted);
+        font-weight: 500;
+        margin-left: 0.5rem;
+    }
+
+    /* Items */
+    .tree-items {
+        padding-left: 1.5rem;
+        position: relative;
+    }
+
+    .tree-item {
+        display: flex;
+        align-items: center;
+        position: relative;
+        min-height: 38px;
+    }
+
+    .tree-item-connector {
+        position: absolute;
+        left: -1.5rem;
+        top: 0;
+        bottom: 0;
+        width: 1.5rem;
+        display: flex;
+        align-items: center;
+    }
+
+    .tree-sub-line {
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: 2px;
+        background: var(--border);
+    }
+
+    .tree-sub-line.half {
+        bottom: 50%;
+    }
+
+    .tree-sub-h-line {
+        position: absolute;
+        left: 0;
+        width: 100%;
+        height: 2px;
+        background: var(--border);
+        top: 50%;
+    }
+
+    .tree-item-content {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.75rem;
+        padding: 0.5rem 0.85rem;
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        margin: 0.2rem 0;
+        transition: border-color 0.2s, background 0.2s;
+    }
+
+    .tree-item-content:hover {
+        border-color: var(--border-light);
+        background: var(--bg-secondary);
+    }
+
+    .tree-item-main {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+        min-width: 0;
+    }
+
+    .tree-item-amount {
+        font-weight: 700;
+        font-size: 0.9rem;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+    }
+
+    .tree-item-sep {
+        color: var(--text-muted);
+        font-size: 0.8rem;
+    }
+
+    .tree-item-cat {
+        font-weight: 600;
+        font-size: 0.85rem;
+        color: var(--text-secondary);
+    }
+
+    .tree-item-desc {
+        font-size: 0.75rem;
+        color: var(--text-muted);
+        font-style: italic;
+    }
+
+    .tree-item-actions {
+        display: flex;
+        gap: 0.15rem;
+        flex-shrink: 0;
+        opacity: 0.4;
+        transition: opacity 0.2s;
+    }
+
+    .tree-item-content:hover .tree-item-actions {
+        opacity: 1;
+    }
+
+    .tree-item-actions .btn {
+        min-width: 32px;
+        min-height: 32px;
+        font-size: 0.85rem;
+    }
+
+    /* ── Edit Modal adjustments ── */
+    #edit-modal .confirm-box {
+        animation: modalSlideIn 0.25s ease;
+    }
+
+    @keyframes modalSlideIn {
+        from {
+            opacity: 0;
+            transform: translateY(20px) scale(0.96);
+        }
+        to {
+            opacity: 1;
+            transform: translateY(0) scale(1);
+        }
+    }
+
+    /* ── Mobile ── */
+    @media (max-width: 640px) {
+        .day-hero-num {
+            font-size: 1.8rem;
+        }
+
+        .day-hero-stats {
+            gap: 1.25rem;
+        }
+
+        .day-hero-value {
+            font-size: 1rem;
+        }
+
+        .tree-container {
+            padding-left: 1.25rem;
+        }
+
+        .tree-trunk {
+            left: 0.25rem;
+        }
+
+        .tree-connector {
+            left: -1.25rem;
+            width: 1.25rem;
+        }
+
+        .tree-branch-label {
+            font-size: 0.9rem;
+        }
+
+        .tree-items {
+            padding-left: 1rem;
+        }
+
+        .tree-item-connector {
+            left: -1rem;
+            width: 1rem;
+        }
+
+        .tree-item-content {
+            flex-wrap: wrap;
+            padding: 0.6rem 0.75rem;
+        }
+
+        .tree-item-main {
+            flex: 1;
+            min-width: 100%;
+        }
+
+        .tree-item-actions {
+            opacity: 1;
+            margin-left: auto;
+        }
+
+        .tree-item-amount {
+            font-size: 0.85rem;
+        }
+    }
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Category data embedded from server
+    const expenseCategories = [
+        {% for cat in expense_categories %}
+        { id: {{ cat.id }}, name: "{{ cat.name }}" },
+        {% endfor %}
+    ];
+
+    const incomeCategories = [
+        {% for cat in income_categories %}
+        { id: {{ cat.id }}, name: "{{ cat.name }}" },
+        {% endfor %}
+    ];
+
+    function openEditModal(type, id, amount, description, dateStr, categoryId) {
+        const modal = document.getElementById('edit-modal');
+        const form = document.getElementById('edit-form');
+        const title = document.getElementById('edit-modal-title');
+        const categorySelect = document.getElementById('edit-category');
+
+        // Set form action
+        if (type === 'income') {
+            form.action = '/income/edit/' + id;
+            title.textContent = 'Edit Income';
+        } else {
+            form.action = '/expenses/edit/' + id;
+            title.textContent = 'Edit Expense';
+        }
+
+        // Fill values
+        document.getElementById('edit-amount').value = amount;
+        document.getElementById('edit-description').value = description;
+        document.getElementById('edit-date').value = dateStr;
+
+        // Populate category dropdown
+        const cats = type === 'income' ? incomeCategories : expenseCategories;
+        categorySelect.innerHTML = '';
+        cats.forEach(c => {
+            const opt = document.createElement('option');
+            opt.value = c.id;
+            opt.textContent = c.name;
+            if (c.id === categoryId) opt.selected = true;
+            categorySelect.appendChild(opt);
+        });
+
+        modal.classList.add('show');
+    }
+
+    function closeEditModal() {
+        document.getElementById('edit-modal').classList.remove('show');
+    }
+
+    // Close modal on overlay click
+    document.getElementById('edit-modal').addEventListener('click', function(e) {
+        if (e.target === this) closeEditModal();
+    });
+
+    // Close modal on Escape key
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') closeEditModal();
+    });
+</script>
+{% endblock %}

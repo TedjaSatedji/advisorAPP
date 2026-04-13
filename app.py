@@ -254,9 +254,46 @@ def add_expense():
 @app.route("/expenses/delete/<int:expense_id>", methods=["POST"])
 def delete_expense(expense_id):
     db = get_db()
+    redirect_to = request.form.get("redirect_to", "")
     db.execute("DELETE FROM expenses WHERE id = ?", (expense_id,))
     db.commit()
     flash("Expense deleted.", "success")
+    if redirect_to:
+        return redirect(redirect_to)
+    return redirect(url_for("dashboard"))
+
+
+@app.route("/expenses/edit/<int:expense_id>", methods=["POST"])
+def edit_expense(expense_id):
+    amount = request.form.get("amount", "").strip()
+    description = request.form.get("description", "").strip()
+    expense_date = request.form.get("date", "").strip()
+    category_id = request.form.get("category_id", "").strip()
+    redirect_to = request.form.get("redirect_to", "")
+
+    if not amount or not category_id or not expense_date:
+        flash("Amount, date, and category are required.", "error")
+        if redirect_to:
+            return redirect(redirect_to)
+        return redirect(url_for("dashboard"))
+
+    try:
+        amount = float(amount)
+    except ValueError:
+        flash("Invalid amount.", "error")
+        if redirect_to:
+            return redirect(redirect_to)
+        return redirect(url_for("dashboard"))
+
+    db = get_db()
+    db.execute(
+        "UPDATE expenses SET amount = ?, description = ?, date = ?, category_id = ? WHERE id = ?",
+        (amount, description, expense_date, int(category_id), expense_id)
+    )
+    db.commit()
+    flash("Expense updated.", "success")
+    if redirect_to:
+        return redirect(redirect_to)
     return redirect(url_for("dashboard"))
 
 
@@ -363,10 +400,170 @@ def add_income():
 @app.route("/income/delete/<int:income_id>", methods=["POST"])
 def delete_income(income_id):
     db = get_db()
+    redirect_to = request.form.get("redirect_to", "")
     db.execute("DELETE FROM income WHERE id = ?", (income_id,))
     db.commit()
     flash("Income entry deleted.", "success")
+    if redirect_to:
+        return redirect(redirect_to)
     return redirect(url_for("income_page"))
+
+
+@app.route("/income/edit/<int:income_id>", methods=["POST"])
+def edit_income(income_id):
+    amount = request.form.get("amount", "").strip()
+    description = request.form.get("description", "").strip()
+    income_date = request.form.get("date", "").strip()
+    category_id = request.form.get("category_id", "").strip()
+    redirect_to = request.form.get("redirect_to", "")
+
+    if not amount or not category_id or not income_date:
+        flash("Amount, date, and source are required.", "error")
+        if redirect_to:
+            return redirect(redirect_to)
+        return redirect(url_for("income_page"))
+
+    try:
+        amount = float(amount)
+    except ValueError:
+        flash("Invalid amount.", "error")
+        if redirect_to:
+            return redirect(redirect_to)
+        return redirect(url_for("income_page"))
+
+    db = get_db()
+    db.execute(
+        "UPDATE income SET amount = ?, description = ?, date = ?, category_id = ? WHERE id = ?",
+        (amount, description, income_date, int(category_id), income_id)
+    )
+    db.commit()
+    flash("Income updated.", "success")
+    if redirect_to:
+        return redirect(redirect_to)
+    return redirect(url_for("income_page"))
+
+
+# ---------------------------------------------------------------------------
+# Routes — Ledger (Daily Overview)
+# ---------------------------------------------------------------------------
+
+@app.route("/ledger")
+def ledger():
+    db = get_db()
+    month_filter = request.args.get("month", "")
+
+    # Get all unique dates that have income or expenses
+    if month_filter:
+        # Filter by month (format: YYYY-MM)
+        days = db.execute("""
+            SELECT d.date,
+                   COALESCE(exp.total, 0) AS expense_total,
+                   COALESCE(inc.total, 0) AS income_total,
+                   COALESCE(exp.cnt, 0) AS expense_count,
+                   COALESCE(inc.cnt, 0) AS income_count
+            FROM (
+                SELECT date FROM expenses WHERE strftime('%Y-%m', date) = ?
+                UNION
+                SELECT date FROM income WHERE strftime('%Y-%m', date) = ?
+            ) d
+            LEFT JOIN (
+                SELECT date, SUM(amount) AS total, COUNT(*) AS cnt FROM expenses GROUP BY date
+            ) exp ON d.date = exp.date
+            LEFT JOIN (
+                SELECT date, SUM(amount) AS total, COUNT(*) AS cnt FROM income GROUP BY date
+            ) inc ON d.date = inc.date
+            ORDER BY d.date DESC
+        """, (month_filter, month_filter)).fetchall()
+    else:
+        days = db.execute("""
+            SELECT d.date,
+                   COALESCE(exp.total, 0) AS expense_total,
+                   COALESCE(inc.total, 0) AS income_total,
+                   COALESCE(exp.cnt, 0) AS expense_count,
+                   COALESCE(inc.cnt, 0) AS income_count
+            FROM (
+                SELECT date FROM expenses
+                UNION
+                SELECT date FROM income
+            ) d
+            LEFT JOIN (
+                SELECT date, SUM(amount) AS total, COUNT(*) AS cnt FROM expenses GROUP BY date
+            ) exp ON d.date = exp.date
+            LEFT JOIN (
+                SELECT date, SUM(amount) AS total, COUNT(*) AS cnt FROM income GROUP BY date
+            ) inc ON d.date = inc.date
+            ORDER BY d.date DESC
+        """).fetchall()
+
+    # Available months for the filter dropdown
+    available_months = db.execute("""
+        SELECT DISTINCT month FROM (
+            SELECT strftime('%Y-%m', date) AS month FROM expenses
+            UNION
+            SELECT strftime('%Y-%m', date) AS month FROM income
+        )
+        ORDER BY month DESC
+    """).fetchall()
+
+    return render_template(
+        "ledger.html",
+        days=days,
+        month_filter=month_filter,
+        available_months=available_months,
+    )
+
+
+@app.route("/ledger/<date_str>")
+def ledger_day(date_str):
+    db = get_db()
+
+    # Validate date format
+    try:
+        datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        flash("Invalid date format.", "error")
+        return redirect(url_for("ledger"))
+
+    # Income entries for this date
+    income_entries = db.execute("""
+        SELECT i.id, i.amount, i.description, i.date, i.category_id, ic.name AS category
+        FROM income i
+        JOIN income_categories ic ON i.category_id = ic.id
+        WHERE i.date = ?
+        ORDER BY i.created_at DESC
+    """, (date_str,)).fetchall()
+
+    # Expense entries for this date
+    expense_entries = db.execute("""
+        SELECT e.id, e.amount, e.description, e.date, e.category_id, c.name AS category
+        FROM expenses e
+        JOIN categories c ON e.category_id = c.id
+        WHERE e.date = ?
+        ORDER BY e.created_at DESC
+    """, (date_str,)).fetchall()
+
+    # Totals
+    income_total = sum(e["amount"] for e in income_entries)
+    expense_total = sum(e["amount"] for e in expense_entries)
+
+    # Categories for edit modals
+    expense_categories = db.execute(
+        "SELECT id, name FROM categories ORDER BY name"
+    ).fetchall()
+    income_categories = db.execute(
+        "SELECT id, name FROM income_categories ORDER BY name"
+    ).fetchall()
+
+    return render_template(
+        "ledger_day.html",
+        date_str=date_str,
+        income_entries=income_entries,
+        expense_entries=expense_entries,
+        income_total=income_total,
+        expense_total=expense_total,
+        expense_categories=expense_categories,
+        income_categories=income_categories,
+    )
 
 
 # ---------------------------------------------------------------------------
