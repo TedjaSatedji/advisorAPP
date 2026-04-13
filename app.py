@@ -939,27 +939,30 @@ def _fetch_yahoo_price(ticker):
         name = ticker.upper()
         prev_close = 0
 
-        # Try fast_info first (most reliable in newer yfinance)
+        # Try fast_info first — must use bracket access, .get() returns None
         try:
             fi = t.fast_info
-            price = _safe_float(fi.get('last_price', 0))
-            prev_close = _safe_float(fi.get('previous_close', 0)) or _safe_float(fi.get('regular_market_previous_close', 0))
-        except Exception as e:
-            print(f"[YFinance] fast_info error for {ticker}: {e}", flush=True)
+            price = _safe_float(fi['lastPrice'])
+            prev_close = _safe_float(fi['previousClose'])
+        except Exception:
+            pass
+
+        # If lastPrice was NaN/0, try previousClose as the price
+        if price == 0 and prev_close > 0:
+            price = prev_close
 
         # Fallback: get from recent history
         if price == 0:
             try:
                 hist = t.history(period="5d")
                 if not hist.empty:
-                    # Drop NaN rows (today's entry may be NaN if market closed)
                     closes = hist["Close"].dropna()
                     if not closes.empty:
                         price = _safe_float(closes.iloc[-1])
                         if len(closes) >= 2:
                             prev_close = _safe_float(closes.iloc[-2])
-            except Exception as e:
-                print(f"[YFinance] history error for {ticker}: {e}", flush=True)
+            except Exception:
+                pass
 
         # Try to get company name
         try:
@@ -969,12 +972,10 @@ def _fetch_yahoo_price(ticker):
             pass
 
         if price == 0:
-            print(f"[YFinance] No price found for {ticker}", flush=True)
             return None
 
         return {"price": price, "name": name, "prev_close": prev_close}
-    except Exception as e:
-        print(f"[YFinance] Fatal error for {ticker}: {e}", flush=True)
+    except Exception:
         return None
 
 
@@ -1157,7 +1158,6 @@ def refresh_all_stock_prices():
     # Update portfolio stocks
     holdings = db.execute("SELECT id, ticker FROM stocks").fetchall()
     for h in holdings:
-        print(f"[Refresh] Fetching {h['ticker']}...", flush=True)
         info = _fetch_yahoo_price(h["ticker"])
         if info:
             db.execute(
@@ -1165,16 +1165,13 @@ def refresh_all_stock_prices():
                 (info["price"], info["name"], h["id"])
             )
             updated += 1
-            print(f"[Refresh]   ✓ {h['ticker']}: {info['price']}", flush=True)
         else:
             errors += 1
-            print(f"[Refresh]   ✗ {h['ticker']}: FAILED", flush=True)
         _time.sleep(0.3)
 
     # Update watchlist stocks
     watchlist = db.execute("SELECT id, ticker FROM watchlist_stocks").fetchall()
     for w in watchlist:
-        print(f"[Refresh] Fetching {w['ticker']}...", flush=True)
         info = _fetch_yahoo_price(w["ticker"])
         if info:
             db.execute(
@@ -1184,10 +1181,8 @@ def refresh_all_stock_prices():
                 (info["price"], info["name"], info["prev_close"], w["id"])
             )
             updated += 1
-            print(f"[Refresh]   ✓ {w['ticker']}: {info['price']}", flush=True)
         else:
             errors += 1
-            print(f"[Refresh]   ✗ {w['ticker']}: FAILED", flush=True)
         _time.sleep(0.3)
 
     db.commit()
