@@ -5,6 +5,7 @@ Flask + SQLite + Jinja2. Dark-mode editorial dashboard.
 
 import sqlite3
 import os
+import threading
 from datetime import datetime, date
 from flask import (
     Flask, render_template, request, redirect, url_for,
@@ -89,6 +90,37 @@ def init_db():
             category_id     INTEGER NOT NULL,
             created_at      TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
             FOREIGN KEY (category_id) REFERENCES income_categories(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS stocks (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker          TEXT    NOT NULL,
+            name            TEXT    NOT NULL DEFAULT '',
+            lots            INTEGER NOT NULL DEFAULT 1,
+            shares_per_lot  INTEGER NOT NULL DEFAULT 100,
+            avg_buy_price   REAL    NOT NULL DEFAULT 0,
+            current_price   REAL    NOT NULL DEFAULT 0,
+            last_updated    TEXT    DEFAULT NULL,
+            created_at      TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+        );
+
+        CREATE TABLE IF NOT EXISTS watchlist_stocks (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker          TEXT    NOT NULL UNIQUE,
+            name            TEXT    NOT NULL DEFAULT '',
+            current_price   REAL    NOT NULL DEFAULT 0,
+            prev_close      REAL    NOT NULL DEFAULT 0,
+            last_updated    TEXT    DEFAULT NULL,
+            created_at      TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+        );
+
+        CREATE TABLE IF NOT EXISTS stock_pl_history (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            date            TEXT    NOT NULL UNIQUE,
+            total_value     REAL    NOT NULL DEFAULT 0,
+            total_investment REAL   NOT NULL DEFAULT 0,
+            unrealized_pl   REAL    NOT NULL DEFAULT 0,
+            created_at      TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
         );
     """)
 
@@ -884,8 +916,370 @@ def delete_wishlist(item_id):
 
 
 # ---------------------------------------------------------------------------
-# API — for AJAX calls (chart data, etc.)
+# Routes — Stocks Portfolio
 # ---------------------------------------------------------------------------
+
+def _fetch_yahoo_price(ticker):
+    """Fetch current price and info from Yahoo Finance. Returns dict or None."""
+    import math
+
+    def _safe_float(val):
+        """Convert to float, treating NaN/None as 0."""
+        try:
+            f = float(val)
+            return 0 if math.isnan(f) else f
+        except (TypeError, ValueError):
+            return 0
+
+    try:
+        import yfinance as yf
+        t = yf.Ticker(ticker)
+
+        price = 0
+        name = ticker.upper()
+        prev_close = 0
+
+        # Try fast_info first (most reliable in newer yfinance)
+        try:
+            fi = t.fast_info
+            price = _safe_float(fi.get('last_price', 0))
+            prev_close = _safe_float(fi.get('previous_close', 0)) or _safe_float(fi.get('regular_market_previous_close', 0))
+        except Exception as e:
+            print(f"[YFinance] fast_info error for {ticker}: {e}", flush=True)
+
+        # Fallback: get from recent history
+        if price == 0:
+            try:
+                hist = t.history(period="5d")
+                if not hist.empty:
+                    # Drop NaN rows (today's entry may be NaN if market closed)
+                    closes = hist["Close"].dropna()
+                    if not closes.empty:
+                        price = _safe_float(closes.iloc[-1])
+                        if len(closes) >= 2:
+                            prev_close = _safe_float(closes.iloc[-2])
+            except Exception as e:
+                print(f"[YFinance] history error for {ticker}: {e}", flush=True)
+
+        # Try to get company name
+        try:
+            info = t.info
+            name = info.get("shortName") or info.get("longName") or name
+        except Exception:
+            pass
+
+        if price == 0:
+            print(f"[YFinance] No price found for {ticker}", flush=True)
+            return None
+
+        return {"price": price, "name": name, "prev_close": prev_close}
+    except Exception as e:
+        print(f"[YFinance] Fatal error for {ticker}: {e}", flush=True)
+        return None
+
+
+def _record_pl_snapshot(db):
+    """Record today's portfolio P/L snapshot. Updates if today's entry exists."""
+    today_str = date.today().isoformat()
+    holdings = db.execute("SELECT * FROM stocks").fetchall()
+
+    total_value = 0
+    total_investment = 0
+    for h in holdings:
+        shares = h["lots"] * h["shares_per_lot"]
+        total_value += h["current_price"] * shares
+        total_investment += h["avg_buy_price"] * shares
+
+    unrealized_pl = total_value - total_investment
+
+    # Upsert: replace if today already has an entry
+    db.execute(
+        """INSERT INTO stock_pl_history (date, total_value, total_investment, unrealized_pl)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(date) DO UPDATE SET
+               total_value = excluded.total_value,
+               total_investment = excluded.total_investment,
+               unrealized_pl = excluded.unrealized_pl,
+               created_at = datetime('now','localtime')""",
+        (today_str, total_value, total_investment, unrealized_pl)
+    )
+    db.commit()
+
+
+@app.route("/stocks")
+def stocks_page():
+    db = get_db()
+
+    holdings = db.execute("""
+        SELECT * FROM stocks ORDER BY ticker ASC
+    """).fetchall()
+
+    watchlist = db.execute("""
+        SELECT * FROM watchlist_stocks ORDER BY ticker ASC
+    """).fetchall()
+
+    # Portfolio calculations
+    total_value = 0
+    total_investment = 0
+    for h in holdings:
+        shares = h["lots"] * h["shares_per_lot"]
+        total_value += h["current_price"] * shares
+        total_investment += h["avg_buy_price"] * shares
+
+    unrealized_pl = total_value - total_investment
+    pl_pct = (unrealized_pl / total_investment * 100) if total_investment > 0 else 0
+
+    # P/L history for chart (last 30 days)
+    pl_history = db.execute("""
+        SELECT date, total_value, total_investment, unrealized_pl
+        FROM stock_pl_history
+        ORDER BY date DESC
+        LIMIT 30
+    """).fetchall()
+    # Reverse so it's oldest → newest for the chart
+    pl_history = list(reversed(pl_history))
+
+    return render_template(
+        "stocks.html",
+        holdings=holdings,
+        watchlist=watchlist,
+        total_value=total_value,
+        total_investment=total_investment,
+        unrealized_pl=unrealized_pl,
+        pl_pct=pl_pct,
+        pl_history=pl_history,
+    )
+
+
+@app.route("/stocks/add", methods=["POST"])
+def add_stock():
+    ticker = request.form.get("ticker", "").strip().upper()
+    lots = request.form.get("lots", "1").strip()
+    shares_per_lot = request.form.get("shares_per_lot", "100").strip()
+    avg_buy_price = request.form.get("avg_buy_price", "0").strip()
+
+    if not ticker:
+        flash("Ticker is required.", "error")
+        return redirect(url_for("stocks_page"))
+
+    try:
+        lots = int(lots)
+        shares_per_lot = int(shares_per_lot)
+        avg_buy_price = float(avg_buy_price)
+    except ValueError:
+        flash("Invalid numeric values.", "error")
+        return redirect(url_for("stocks_page"))
+
+    # Try to fetch current price from Yahoo Finance
+    info = _fetch_yahoo_price(ticker)
+    current_price = info["price"] if info else 0
+    name = info["name"] if info else ticker
+
+    db = get_db()
+    db.execute(
+        """INSERT INTO stocks (ticker, name, lots, shares_per_lot, avg_buy_price, current_price, last_updated)
+           VALUES (?, ?, ?, ?, ?, ?, datetime('now','localtime'))""",
+        (ticker, name, lots, shares_per_lot, avg_buy_price, current_price)
+    )
+    db.commit()
+    flash(f"Stock '{ticker}' added to portfolio.", "success")
+    return redirect(url_for("stocks_page"))
+
+
+@app.route("/stocks/edit/<int:stock_id>", methods=["POST"])
+def edit_stock(stock_id):
+    ticker = request.form.get("ticker", "").strip().upper()
+    lots = request.form.get("lots", "1").strip()
+    shares_per_lot = request.form.get("shares_per_lot", "100").strip()
+    avg_buy_price = request.form.get("avg_buy_price", "0").strip()
+
+    if not ticker:
+        flash("Ticker is required.", "error")
+        return redirect(url_for("stocks_page"))
+
+    try:
+        lots = int(lots)
+        shares_per_lot = int(shares_per_lot)
+        avg_buy_price = float(avg_buy_price)
+    except ValueError:
+        flash("Invalid numeric values.", "error")
+        return redirect(url_for("stocks_page"))
+
+    db = get_db()
+    db.execute(
+        """UPDATE stocks SET ticker = ?, lots = ?, shares_per_lot = ?, avg_buy_price = ?
+           WHERE id = ?""",
+        (ticker, lots, shares_per_lot, avg_buy_price, stock_id)
+    )
+    db.commit()
+    flash(f"Stock '{ticker}' updated.", "success")
+    return redirect(url_for("stocks_page"))
+
+
+@app.route("/stocks/delete/<int:stock_id>", methods=["POST"])
+def delete_stock(stock_id):
+    db = get_db()
+    db.execute("DELETE FROM stocks WHERE id = ?", (stock_id,))
+    db.commit()
+    flash("Stock removed from portfolio.", "success")
+    return redirect(url_for("stocks_page"))
+
+
+@app.route("/stocks/update-price/<int:stock_id>", methods=["POST"])
+def update_stock_price(stock_id):
+    """Manually set a stock's current price."""
+    price = request.form.get("current_price", "0").strip()
+    try:
+        price = float(price)
+    except ValueError:
+        flash("Invalid price.", "error")
+        return redirect(url_for("stocks_page"))
+
+    db = get_db()
+    db.execute(
+        "UPDATE stocks SET current_price = ?, last_updated = datetime('now','localtime') WHERE id = ?",
+        (price, stock_id)
+    )
+    db.commit()
+    _record_pl_snapshot(db)
+    flash("Price updated.", "success")
+    return redirect(url_for("stocks_page"))
+
+
+@app.route("/stocks/refresh-all", methods=["POST"])
+def refresh_all_stock_prices():
+    """Refresh all portfolio + watchlist prices from Yahoo Finance."""
+    import time as _time
+    db = get_db()
+    updated = 0
+    errors = 0
+
+    # Update portfolio stocks
+    holdings = db.execute("SELECT id, ticker FROM stocks").fetchall()
+    for h in holdings:
+        print(f"[Refresh] Fetching {h['ticker']}...", flush=True)
+        info = _fetch_yahoo_price(h["ticker"])
+        if info:
+            db.execute(
+                "UPDATE stocks SET current_price = ?, name = ?, last_updated = datetime('now','localtime') WHERE id = ?",
+                (info["price"], info["name"], h["id"])
+            )
+            updated += 1
+            print(f"[Refresh]   ✓ {h['ticker']}: {info['price']}", flush=True)
+        else:
+            errors += 1
+            print(f"[Refresh]   ✗ {h['ticker']}: FAILED", flush=True)
+        _time.sleep(0.3)
+
+    # Update watchlist stocks
+    watchlist = db.execute("SELECT id, ticker FROM watchlist_stocks").fetchall()
+    for w in watchlist:
+        print(f"[Refresh] Fetching {w['ticker']}...", flush=True)
+        info = _fetch_yahoo_price(w["ticker"])
+        if info:
+            db.execute(
+                """UPDATE watchlist_stocks
+                   SET current_price = ?, name = ?, prev_close = ?, last_updated = datetime('now','localtime')
+                   WHERE id = ?""",
+                (info["price"], info["name"], info["prev_close"], w["id"])
+            )
+            updated += 1
+            print(f"[Refresh]   ✓ {w['ticker']}: {info['price']}", flush=True)
+        else:
+            errors += 1
+            print(f"[Refresh]   ✗ {w['ticker']}: FAILED", flush=True)
+        _time.sleep(0.3)
+
+    db.commit()
+    msg = f"Updated {updated} ticker(s)."
+    if errors:
+        msg += f" {errors} failed."
+    flash(msg, "success" if errors == 0 else "error")
+
+    # Auto-snapshot today's P/L after refresh
+    _record_pl_snapshot(db)
+
+    return redirect(url_for("stocks_page"))
+
+
+@app.route("/stocks/snapshot", methods=["POST"])
+def record_stock_snapshot():
+    """Manually record today's P/L snapshot."""
+    db = get_db()
+    _record_pl_snapshot(db)
+    flash("Today's P/L snapshot recorded.", "success")
+    return redirect(url_for("stocks_page"))
+
+
+# ---------------------------------------------------------------------------
+# Routes — Watchlist Stocks
+# ---------------------------------------------------------------------------
+
+@app.route("/watchlist-stocks/add", methods=["POST"])
+def add_watchlist_stock():
+    ticker = request.form.get("ticker", "").strip().upper()
+    if not ticker:
+        flash("Ticker is required.", "error")
+        return redirect(url_for("stocks_page"))
+
+    info = _fetch_yahoo_price(ticker)
+    current_price = info["price"] if info else 0
+    name = info["name"] if info else ticker
+    prev_close = info["prev_close"] if info else 0
+
+    db = get_db()
+    try:
+        db.execute(
+            """INSERT INTO watchlist_stocks (ticker, name, current_price, prev_close, last_updated)
+               VALUES (?, ?, ?, ?, datetime('now','localtime'))""",
+            (ticker, name, current_price, prev_close)
+        )
+        db.commit()
+        flash(f"'{ticker}' added to watchlist.", "success")
+    except sqlite3.IntegrityError:
+        flash(f"'{ticker}' is already in your watchlist.", "error")
+    return redirect(url_for("stocks_page"))
+
+
+@app.route("/watchlist-stocks/delete/<int:item_id>", methods=["POST"])
+def delete_watchlist_stock(item_id):
+    db = get_db()
+    db.execute("DELETE FROM watchlist_stocks WHERE id = ?", (item_id,))
+    db.commit()
+    flash("Removed from watchlist.", "success")
+    return redirect(url_for("stocks_page"))
+
+
+# ---------------------------------------------------------------------------
+# API — for AJAX calls (chart data, stock prices, etc.)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/stock-price/<ticker>")
+def api_stock_price(ticker):
+    """Fetch live price for a single ticker via Yahoo Finance."""
+    info = _fetch_yahoo_price(ticker.upper())
+    if info:
+        return jsonify({"ok": True, "ticker": ticker.upper(), **info})
+    return jsonify({"ok": False, "error": "Could not fetch price."}), 404
+
+
+@app.route("/api/stock-pl-history")
+def api_stock_pl_history():
+    """Return P/L history for charting."""
+    db = get_db()
+    rows = db.execute("""
+        SELECT date, total_value, total_investment, unrealized_pl
+        FROM stock_pl_history
+        ORDER BY date ASC
+        LIMIT 90
+    """).fetchall()
+    return jsonify([{
+        "date": r["date"],
+        "total_value": r["total_value"],
+        "total_investment": r["total_investment"],
+        "unrealized_pl": r["unrealized_pl"]
+    } for r in rows])
+
 
 @app.route("/api/daily-expenses")
 def api_daily_expenses():

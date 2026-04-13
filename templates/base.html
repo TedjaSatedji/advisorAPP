@@ -97,20 +97,21 @@
             display: flex;
             flex-direction: column;
             align-items: center;
-            gap: 0.15rem;
+            gap: 0.1rem;
             color: var(--text-muted);
             text-decoration: none;
-            font-size: 0.6rem;
+            font-size: 0.5rem;
             font-weight: 600;
-            letter-spacing: 0.04em;
+            letter-spacing: 0.02em;
             text-transform: uppercase;
-            padding: 0.3rem 0.75rem;
+            padding: 0.25rem 0.25rem;
             border-radius: 6px;
             transition: color 0.2s;
+            min-width: 0;
         }
 
         .bottom-nav a .nav-icon {
-            font-size: 1.25rem;
+            font-size: 1rem;
             line-height: 1;
         }
 
@@ -868,6 +869,7 @@
                 <li><a href="{{ url_for('reports') }}" class="{% if request.endpoint == 'reports' %}active{% endif %}">Reports</a></li>
                 <li><a href="{{ url_for('categories') }}" class="{% if request.endpoint == 'categories' %}active{% endif %}">Categories</a></li>
                 <li><a href="{{ url_for('wishlist') }}" class="{% if request.endpoint == 'wishlist' %}active{% endif %}">Wishlist</a></li>
+                <li><a href="{{ url_for('stocks_page') }}" class="{% if request.endpoint == 'stocks_page' %}active{% endif %}">Stocks</a></li>
             </ul>
             <div class="hamburger" id="hamburger" onclick="document.getElementById('nav-links').classList.toggle('open')">
                 <span></span><span></span><span></span>
@@ -918,6 +920,10 @@
             <a href="{{ url_for('categories') }}" class="{% if request.endpoint == 'categories' %}active{% endif %}">
                 <span class="nav-icon">⊞</span>
                 Categories
+            </a>
+            <a href="{{ url_for('stocks_page') }}" class="{% if request.endpoint == 'stocks_page' %}active{% endif %}">
+                <span class="nav-icon">◆</span>
+                Stocks
             </a>
             <a href="{{ url_for('wishlist') }}" class="{% if request.endpoint == 'wishlist' %}active{% endif %}">
                 <span class="nav-icon">✦</span>
