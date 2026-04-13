@@ -902,6 +902,32 @@ def add_wishlist():
     return redirect(url_for("wishlist"))
 
 
+@app.route("/wishlist/edit/<int:item_id>", methods=["POST"])
+def edit_wishlist(item_id):
+    name = request.form.get("name", "").strip()
+    price = request.form.get("price", "0").strip()
+    priority = request.form.get("priority", "medium").strip()
+    notes = request.form.get("notes", "").strip()
+
+    if not name:
+        flash("Item name is required.", "error")
+        return redirect(url_for("wishlist"))
+
+    try:
+        price = float(price)
+    except ValueError:
+        price = 0
+
+    db = get_db()
+    db.execute(
+        "UPDATE wishlist SET name = ?, price = ?, priority = ?, notes = ? WHERE id = ?",
+        (name, price, priority, notes, item_id)
+    )
+    db.commit()
+    flash(f"'{name}' updated.", "success")
+    return redirect(url_for("wishlist"))
+
+
 @app.route("/wishlist/purchase/<int:item_id>", methods=["POST"])
 def purchase_wishlist(item_id):
     db = get_db()
