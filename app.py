@@ -614,12 +614,20 @@ def reports():
 
     if from_date and to_date:
         results = db.execute("""
-            SELECT e.id, e.amount, e.description, e.date, c.name AS category
-            FROM expenses e
-            JOIN categories c ON e.category_id = c.id
-            WHERE e.date >= ? AND e.date <= ?
-            ORDER BY e.date DESC, e.created_at DESC
-        """, (from_date, to_date)).fetchall()
+            SELECT id, amount, description, date, category, type, created_at
+            FROM (
+                SELECT e.id, e.amount, e.description, e.date, c.name AS category, 'expense' AS type, e.created_at
+                FROM expenses e
+                JOIN categories c ON e.category_id = c.id
+                WHERE e.date >= ? AND e.date <= ?
+                UNION ALL
+                SELECT i.id, i.amount, i.description, i.date, ic.name AS category, 'income' AS type, i.created_at
+                FROM income i
+                JOIN income_categories ic ON i.category_id = ic.id
+                WHERE i.date >= ? AND i.date <= ?
+            )
+            ORDER BY date DESC, created_at DESC
+        """, (from_date, to_date, from_date, to_date)).fetchall()
 
         row = db.execute(
             "SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE date >= ? AND date <= ?",
