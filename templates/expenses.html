@@ -1,0 +1,487 @@
+{% extends "base.html" %}
+{% block title %}Expenses · XPense{% endblock %}
+
+{% block content %}
+<!-- ── Summary Stats ── -->
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-label">Today's Spending</div>
+        <div class="stat-value text-danger">
+            <span class="currency">Rp</span> {{ "{:,.0f}".format(today_total) }}
+        </div>
+        <div class="stat-sub">{{ today_str }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">This Month</div>
+        <div class="stat-value text-danger">
+            <span class="currency">Rp</span> {{ "{:,.0f}".format(month_total) }}
+        </div>
+        <div class="stat-sub">{{ now.strftime('%B %Y') }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">All-Time Expense</div>
+        <div class="stat-value">
+            <span class="currency">Rp</span> {{ "{:,.0f}".format(all_time_total) }}
+        </div>
+        <div class="stat-sub">Total spent</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Top Category (Month)</div>
+        {% if top_categories %}
+        <div class="stat-value" style="font-size:1.15rem;">{{ top_categories[0].name }}</div>
+        <div class="stat-sub">Rp {{ "{:,.0f}".format(top_categories[0].total) }}</div>
+        {% else %}
+        <div class="stat-value text-muted" style="font-size:1rem;">—</div>
+        <div class="stat-sub">No data yet</div>
+        {% endif %}
+    </div>
+</div>
+
+<div class="layout-2col">
+    <!-- ── Left: Recent Expenses ── -->
+    <div>
+        <div class="section-header">
+            <h2 class="section-title">Recent Expenses</h2>
+            <span class="text-muted" style="font-size:0.72rem;">Last 50 entries</span>
+        </div>
+
+        {% if grouped_expenses %}
+            {% for date_key, entries in grouped_expenses.items() %}
+            <div class="date-header">
+                {{ date_key }}
+                <span style="float:right; color: var(--text-secondary);">
+                    Rp {{ "{:,.0f}".format(entries | sum(attribute='amount')) }}
+                </span>
+            </div>
+
+            <!-- Desktop table -->
+            <table class="data-table mb-2 desktop-only">
+                <thead>
+                    <tr>
+                        <th style="width:28%">Description</th>
+                        <th style="width:18%">Category</th>
+                        <th style="width:12%">Image</th>
+                        <th style="width:22%; text-align:right">Amount</th>
+                        <th style="width:20%; text-align:right">Action</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for e in entries %}
+                    <tr>
+                        <td>{{ e.description or '—' }}</td>
+                        <td><span class="cat-pill">{{ e.category }}</span></td>
+                        <td>
+                            {% if e.receipt_image %}
+                            <a href="{{ url_for('static', filename=e.receipt_image) }}" target="_blank" rel="noopener">View</a>
+                            {% else %}
+                            —
+                            {% endif %}
+                        </td>
+                        <td class="amount" style="text-align:right">Rp {{ "{:,.0f}".format(e.amount) }}</td>
+                        <td style="text-align:right">
+                            <button type="button" class="btn btn-ghost btn-sm" onclick="openEditExpense({{ e.id }}, {{ e.amount }}, '{{ e.description or '' }}', '{{ e.date }}', {{ e.category_id }})" style="margin-right:0.25rem;">✎</button>
+                            <form id="del-exp-d-{{ e.id }}" method="POST" action="{{ url_for('delete_expense', expense_id=e.id) }}" style="display:inline">
+                                <button type="button" class="btn btn-ghost btn-sm text-danger" onclick="confirmDelete('del-exp-d-{{ e.id }}', '{{ e.description or 'this expense' }}')">✕</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+
+            <!-- Mobile card list -->
+            <div class="mobile-list mobile-only mb-2">
+                {% for e in entries %}
+                <div class="mobile-item">
+                    <div class="mobile-item-info">
+                        <div class="mobile-item-name">{{ e.description or '—' }}</div>
+                        <div class="mobile-item-meta">
+                            <span class="cat-pill">{{ e.category }}</span>
+                            {% if e.receipt_image %}
+                            <span>·</span>
+                            <a href="{{ url_for('static', filename=e.receipt_image) }}" target="_blank" rel="noopener">image</a>
+                            {% endif %}
+                        </div>
+                    </div>
+                    <div style="display:flex; align-items:center; gap:0.5rem;">
+                        <span class="mobile-item-amount">Rp {{ "{:,.0f}".format(e.amount) }}</span>
+                        <button type="button" class="btn btn-ghost btn-sm" onclick="openEditExpense({{ e.id }}, {{ e.amount }}, '{{ e.description or '' }}', '{{ e.date }}', {{ e.category_id }})" style="min-width:36px; min-height:36px; font-size:0.9rem;">✎</button>
+                        <form id="del-exp-m-{{ e.id }}" method="POST" action="{{ url_for('delete_expense', expense_id=e.id) }}" style="display:inline">
+                            <button type="button" class="btn btn-ghost btn-sm text-danger" style="min-width:36px; min-height:36px; font-size:0.9rem;" onclick="confirmDelete('del-exp-m-{{ e.id }}', '{{ e.description or 'this expense' }}')">✕</button>
+                        </form>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+            {% endfor %}
+        {% else %}
+            <div class="empty-state">
+                <div class="icon">📊</div>
+                <p>No expenses recorded yet.</p>
+                <p style="font-size:0.75rem" class="mt-1">Use the form on the right to add your first entry.</p>
+            </div>
+        {% endif %}
+    </div>
+
+    <!-- ── Right: Add Expense Form ── -->
+    <div>
+        <div class="card">
+            <div class="section-header" style="margin-bottom:1.25rem;">
+                <h2 class="section-title">Add Expense</h2>
+                <span class="text-accent" style="font-size:0.72rem;">▸ New</span>
+            </div>
+            <form method="POST" action="{{ url_for('add_expense') }}" id="add-expense-form" enctype="multipart/form-data">
+                <div class="form-group">
+                    <label class="form-label" for="amount">Amount (Rp)</label>
+                    <input type="number" step="0.01" min="0" name="amount" id="amount" class="form-input" placeholder="0" required>
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="description">Description</label>
+                    <input type="text" name="description" id="description" class="form-input" placeholder="What did you spend on?">
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label" for="date">Date</label>
+                        <input type="date" name="date" id="date" class="form-input" value="{{ today_str }}">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="category_id">Category</label>
+                        <select name="category_id" id="category_id" class="form-select" required>
+                            <option value="" selected>Select a category</option>
+                            {% for cat in categories %}
+                            <option value="{{ cat.id }}">{{ cat.name }}</option>
+                            {% endfor %}
+                            <option value="__add_new__">+ Add new category...</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="receipt_image">Receipt Image (optional)</label>
+                    <input type="file" name="receipt_image" id="receipt_image" class="form-input" accept="image/png,image/jpeg,image/jpg,image/webp">
+                </div>
+                <button type="submit" class="btn btn-primary" style="width:100%; margin-top:0.5rem;">
+                    Add Expense
+                </button>
+                <button type="button" id="scan-expense-photo-btn" class="btn btn-secondary" style="width:100%; margin-top:0.5rem;">
+                    Scan Expense Photo
+                </button>
+                <p id="scan-expense-status" class="text-muted" style="font-size:0.72rem; margin-top:0.5rem;"></p>
+            </form>
+        </div>
+
+        {% if top_categories %}
+        <div class="card">
+            <div class="section-header" style="margin-bottom:1rem;">
+                <h2 class="section-title">Categories (Month)</h2>
+            </div>
+            {% set month_max = top_categories[0].total if top_categories else 1 %}
+            {% for cat in top_categories %}
+            <div style="margin-bottom:0.75rem;">
+                <div class="flex justify-between mb-1" style="font-size:0.8rem;">
+                    <span>{{ cat.name }}</span>
+                    <span class="tabular" style="color:var(--text-secondary)">Rp {{ "{:,.0f}".format(cat.total) }}</span>
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-fill" style="width: {{ (cat.total / month_max * 100) }}%"></div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    (function() {
+        const scanBtn = document.getElementById('scan-expense-photo-btn');
+        const fileInput = document.getElementById('receipt_image');
+        const statusEl = document.getElementById('scan-expense-status');
+
+        if (!scanBtn || !fileInput) return;
+
+        scanBtn.addEventListener('click', () => fileInput.click());
+
+        fileInput.addEventListener('change', async () => {
+            const file = fileInput.files && fileInput.files[0];
+            if (!file) return;
+
+            const form = new FormData();
+            form.append('photo', file);
+            form.append('target', 'expense');
+
+            scanBtn.disabled = true;
+            statusEl.textContent = 'Analyzing image...';
+
+            try {
+                const res = await fetch('/api/recognize-transaction-photo', {
+                    method: 'POST',
+                    body: form,
+                });
+                const contentType = String(res.headers.get('content-type') || '').toLowerCase();
+                let data = null;
+                if (contentType.includes('application/json')) {
+                    data = await res.json();
+                } else {
+                    const text = await res.text();
+                    throw new Error('Scan failed: server returned a non-JSON response.' + (text ? ' ' + text.slice(0, 120) : ''));
+                }
+
+                if (!res.ok || !data.ok) {
+                    throw new Error(data.error || 'Scan failed.');
+                }
+
+                if (typeof data.amount === 'number' && data.amount > 0) {
+                    document.getElementById('amount').value = data.amount.toFixed(2);
+                }
+                if (data.description) {
+                    document.getElementById('description').value = data.description;
+                }
+                if (data.date) {
+                    document.getElementById('date').value = data.date;
+                }
+
+                let matchedCategory = false;
+                const normalizeCategory = (value) => String(value || '')
+                    .toLowerCase()
+                    .replace(/[^a-z0-9\s]/g, ' ')
+                    .replace(/\s+/g, ' ')
+                    .trim();
+                const genericCategories = new Set(['makanan', 'minuman', 'food', 'drink', 'other', 'others', 'misc', 'miscellaneous', 'cafe', 'restaurant']);
+                const likelyCategory = String(data.likely_category_match || data.category_name_raw || data.category_name || '').trim();
+                const capitalizedLikelyCategory = likelyCategory.charAt(0).toUpperCase() + likelyCategory.slice(1);
+                const shouldSuggestAddCategory = Boolean(data.suggest_add_category);
+
+                const categorySelect = document.getElementById('category_id');
+                const inferredCandidates = [data.category_name, likelyCategory, data.category_name_raw]
+                    .map((value) => normalizeCategory(value))
+                    .filter(Boolean);
+
+                for (const candidate of inferredCandidates) {
+                    const option = Array.from(categorySelect.options).find(
+                        (opt) => normalizeCategory(opt.textContent || '') === candidate
+                    );
+                    if (option) {
+                        categorySelect.value = option.value;
+                        matchedCategory = true;
+                        break;
+                    }
+                }
+
+                if (!matchedCategory && shouldSuggestAddCategory) {
+                    const popupMessage = likelyCategory
+                        ? 'I didnt see any category fitting for this, add a new one?\n\nMost likely category: ' + capitalizedLikelyCategory
+                        : 'I didnt see any category fitting for this, add a new one?';
+                    if (window.confirm(popupMessage)) {
+                        if (!likelyCategory) {
+                            statusEl.textContent = 'Could not infer a category to add.';
+                            return;
+                        }
+
+                        const categoryName = likelyCategory.charAt(0).toUpperCase() + likelyCategory.slice(1);
+                        const createRes = await fetch('/categories/add', {
+                            method: 'POST',
+                            headers: {
+                                'X-Requested-With': 'fetch',
+                            },
+                            body: new URLSearchParams({ name: categoryName }),
+                        });
+                        const createData = await createRes.json();
+                        if (!createRes.ok || !createData.ok) {
+                            throw new Error(createData.error || 'Failed to add category.');
+                        }
+
+                        const categorySelect = document.getElementById('category_id');
+                        let option = Array.from(categorySelect.options).find((opt) => String(opt.value) === String(createData.id));
+                        if (!option) {
+                            option = document.createElement('option');
+                            option.value = createData.id;
+                            option.textContent = createData.name;
+                            categorySelect.appendChild(option);
+                        }
+                        categorySelect.value = String(createData.id);
+                        statusEl.textContent = createData.existing ? 'Added to your categories list.' : 'Category added and selected.';
+                        return;
+                    }
+
+                    if (data.category_prompt) {
+                        statusEl.innerHTML = data.category_prompt + (likelyCategory ? ' Most likely: <strong>' + likelyCategory + '</strong>.' : '');
+                    } else if (likelyCategory && !genericCategories.has(normalizeCategory(likelyCategory))) {
+                        statusEl.innerHTML = 'I didnt see any category fitting for this, add a new one? Most likely: <strong>' + likelyCategory + '</strong>.';
+                    } else if (likelyCategory) {
+                        statusEl.innerHTML = 'I didnt see any category fitting for this, add a new one?';
+                    } else {
+                        statusEl.textContent = 'Could not infer a category. Please choose one manually.';
+                    }
+                } else if (!matchedCategory) {
+                    if (likelyCategory) {
+                        statusEl.innerHTML = 'Most likely category <strong>' + likelyCategory + '</strong> is already in your list. Please select it manually.';
+                    } else {
+                        statusEl.textContent = 'Could not infer a category. Please choose one manually.';
+                    }
+                } else {
+                    statusEl.textContent = 'Scanned successfully.';
+                }
+            } catch (err) {
+                statusEl.textContent = err.message || 'Failed to scan image.';
+            } finally {
+                scanBtn.disabled = false;
+            }
+        });
+    })();
+</script>
+
+<!-- Edit Expense Modal -->
+<div id="editExpenseModal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.5); z-index:1000; align-items:center; justify-content:center;">
+    <div class="card" style="max-width:450px; width:90%; max-height:90vh; overflow-y:auto;">
+        <div class="section-header" style="margin-bottom:1.25rem;">
+            <h2 class="section-title">Edit Expense</h2>
+        </div>
+        <form id="editExpenseForm" method="POST" style="display:none;">
+            <div class="form-group">
+                <label class="form-label" for="editAmount">Amount (Rp)</label>
+                <input type="number" step="0.01" min="0" name="amount" id="editAmount" class="form-input" required>
+            </div>
+            <div class="form-group">
+                <label class="form-label" for="editDescription">Description</label>
+                <input type="text" name="description" id="editDescription" class="form-input">
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label class="form-label" for="editDate">Date</label>
+                    <input type="date" name="date" id="editDate" class="form-input" required>
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="editCategory">Category</label>
+                    <select name="category_id" id="editCategory" class="form-select" required>
+                        {% for cat in categories %}
+                        <option value="{{ cat.id }}">{{ cat.name }}</option>
+                        {% endfor %}
+                        <option value="__add_new__">+ Add new category...</option>
+                    </select>
+                </div>
+            </div>
+            <div style="display:flex; gap:0.5rem; margin-top:1.5rem;">
+                <button type="submit" class="btn btn-primary" style="flex:1;">Save Changes</button>
+                <button type="button" class="btn btn-secondary" style="flex:1;" onclick="closeEditExpense()">Cancel</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script>
+(function initInlineCategoryCreation() {
+    const addSelect = document.getElementById('category_id');
+    const editSelect = document.getElementById('editCategory');
+    const statusEl = document.getElementById('scan-expense-status');
+    const addCategorySentinel = '__add_new__';
+    const selects = [addSelect, editSelect].filter(Boolean);
+    const lastSelectedBySelect = new WeakMap();
+
+    if (!selects.length) return;
+
+    const rememberSelection = (select) => {
+        const value = String(select.value || '');
+        if (value && value !== addCategorySentinel) {
+            lastSelectedBySelect.set(select, value);
+        }
+    };
+
+    const upsertCategoryOptionToSelect = (select, id, name) => {
+        let option = Array.from(select.options).find((opt) => String(opt.value) === String(id));
+        if (!option) {
+            option = document.createElement('option');
+            option.value = String(id);
+            option.textContent = name;
+            const sentinelOption = Array.from(select.options).find((opt) => opt.value === addCategorySentinel);
+            if (sentinelOption) {
+                select.insertBefore(option, sentinelOption);
+            } else {
+                select.appendChild(option);
+            }
+        }
+    };
+
+    const createCategoryInline = async (select) => {
+        const previousValue = String(lastSelectedBySelect.get(select) || '');
+        const typedName = window.prompt('New category name:');
+        const categoryName = String(typedName || '').trim();
+
+        if (!categoryName) {
+            select.value = previousValue;
+            return;
+        }
+
+        const createRes = await fetch('/categories/add', {
+            method: 'POST',
+            headers: {
+                'X-Requested-With': 'fetch',
+            },
+            body: new URLSearchParams({ name: categoryName }),
+        });
+        const createData = await createRes.json();
+        if (!createRes.ok || !createData.ok) {
+            throw new Error(createData.error || 'Failed to add category.');
+        }
+
+        selects.forEach((targetSelect) => {
+            upsertCategoryOptionToSelect(targetSelect, createData.id, createData.name);
+        });
+
+        const selectedValue = String(createData.id);
+        select.value = selectedValue;
+        lastSelectedBySelect.set(select, selectedValue);
+
+        if (statusEl) {
+            statusEl.textContent = createData.existing
+                ? 'Category already existed and was selected.'
+                : 'Category added and selected.';
+        }
+    };
+
+    selects.forEach((select) => {
+        rememberSelection(select);
+        select.addEventListener('focus', () => rememberSelection(select));
+        select.addEventListener('change', async () => {
+            if (select.value !== addCategorySentinel) {
+                rememberSelection(select);
+                return;
+            }
+
+            try {
+                await createCategoryInline(select);
+            } catch (err) {
+                const previousValue = String(lastSelectedBySelect.get(select) || '');
+                select.value = previousValue;
+                if (statusEl) {
+                    statusEl.textContent = err.message || 'Failed to add category.';
+                }
+            }
+        });
+    });
+})();
+
+function openEditExpense(id, amount, description, date, categoryId) {
+    document.getElementById('editExpenseForm').action = '/expenses/edit/' + id;
+    document.getElementById('editAmount').value = amount || '';
+    document.getElementById('editDescription').value = description || '';
+    document.getElementById('editDate').value = date || '';
+    document.getElementById('editCategory').value = categoryId || '';
+    document.getElementById('editExpenseForm').style.display = 'block';
+    document.getElementById('editExpenseModal').style.display = 'flex';
+}
+
+function closeEditExpense() {
+    document.getElementById('editExpenseModal').style.display = 'none';
+    document.getElementById('editExpenseForm').style.display = 'none';
+}
+
+window.addEventListener('click', (e) => {
+    const modal = document.getElementById('editExpenseModal');
+    if (e.target === modal) {
+        closeEditExpense();
+    }
+});
+</script>
+{% endblock %}

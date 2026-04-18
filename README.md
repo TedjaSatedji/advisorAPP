@@ -1,4 +1,4 @@
-# advisorAPP
+# XPense
 
 A refined, editorial financial tracking dashboard built with Flask + SQLite.
 
@@ -46,13 +46,13 @@ gunicorn -c gunicorn.conf.py app:app
 ## Project Structure
 
 ```
-advisorAPP/
+XPense/
 ├── app.py                  # Flask application
 ├── gunicorn.conf.py        # Production server config
 ├── requirements.txt        # Python dependencies
 ├── tailwind.config.js      # Tailwind source config
 ├── tailwind.input.css      # Tailwind source CSS
-├── advisor.db              # SQLite database (auto-created)
+├── xpense.db               # SQLite database (auto-created)
 ├── static/
 │   └── tailwind.output.css # Pre-compiled CSS
 └── templates/

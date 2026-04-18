@@ -1,25 +1,369 @@
 """
-advisorAPP — A refined financial tracking application.
+XPense — A refined financial tracking application.
 Flask + SQLite + Jinja2. Dark-mode editorial dashboard.
 """
 
 import sqlite3
 import os
-import threading
+import json
+import uuid
+import re
 from datetime import datetime, date
 from flask import (
     Flask, render_template, request, redirect, url_for,
     flash, jsonify, g
 )
+from werkzeug.utils import secure_filename
+
+try:
+    from google import genai  # type: ignore
+    from google.genai import types  # type: ignore
+except Exception:
+    genai = None
+    types = None
 
 # ---------------------------------------------------------------------------
 # App configuration
 # ---------------------------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATABASE = os.path.join(BASE_DIR, "advisor.db")
+DATABASE = os.path.join(BASE_DIR, "xpense.db")
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "advisor-app-secret-key-change-me")
+app.secret_key = os.environ.get("SECRET_KEY", "xpense-app-secret-key-change-me")
+
+API_KEY = "AIzaSyBfTVE1lQF_qZ47dMf42IKrqT2k6j4lRfE"
+MODEL = "gemma-3-27b-it"
+
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", MODEL)
+ENTRY_UPLOAD_REL_DIR = os.path.join("uploads", "entries")
+ENTRY_UPLOAD_DIR = os.path.join(BASE_DIR, "static", "uploads", "entries")
+ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+
+
+def _extract_json_object(text):
+    """Extract a JSON object from plain text or fenced markdown output."""
+    if not text:
+        return None
+
+    raw = text.strip()
+    if raw.startswith("```"):
+        parts = raw.split("```")
+        for p in parts:
+            p = p.strip()
+            if p and not p.lower().startswith("json"):
+                raw = p
+                break
+            if p.lower().startswith("json"):
+                raw = p[4:].strip()
+                break
+
+    try:
+        return json.loads(raw)
+    except Exception:
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            try:
+                return json.loads(raw[start:end + 1])
+            except Exception:
+                return None
+    return None
+
+
+def _extract_json_array(text):
+    """Extract a JSON array from plain text or fenced markdown output."""
+    if not text:
+        return None
+
+    raw = text.strip()
+    if raw.startswith("```"):
+        parts = raw.split("```")
+        for p in parts:
+            p = p.strip()
+            if p and not p.lower().startswith("json"):
+                raw = p
+                break
+            if p.lower().startswith("json"):
+                raw = p[4:].strip()
+                break
+
+    try:
+        return json.loads(raw)
+    except Exception:
+        start = raw.find("[")
+        end = raw.rfind("]")
+        if start != -1 and end != -1 and end > start:
+            try:
+                return json.loads(raw[start:end + 1])
+            except Exception:
+                return None
+    return None
+
+
+def _coerce_amount(value):
+    """Convert mixed amount formats (e.g. 12,345.67 or 12.345,67) to float."""
+    if isinstance(value, (int, float)):
+        return abs(float(value))
+
+    raw = str(value or "").strip()
+    if not raw:
+        return 0.0
+
+    # Keep only numeric separators/sign after removing currency text.
+    cleaned = re.sub(r"[^0-9,.-]", "", raw)
+    if not cleaned:
+        return 0.0
+
+    # Normalize decimal separator when both comma and dot are present.
+    if "," in cleaned and "." in cleaned:
+        if cleaned.rfind(",") > cleaned.rfind("."):
+            cleaned = cleaned.replace(".", "").replace(",", ".")
+        else:
+            cleaned = cleaned.replace(",", "")
+    elif "," in cleaned:
+        # Treat comma as decimal only when likely decimal precision.
+        if cleaned.count(",") == 1 and len(cleaned.split(",")[-1]) in (1, 2):
+            cleaned = cleaned.replace(",", ".")
+        else:
+            cleaned = cleaned.replace(",", "")
+
+    try:
+        return abs(float(cleaned))
+    except Exception:
+        return 0.0
+
+
+def _best_guess_total_from_text(text):
+    """Heuristic fallback to detect payable total from plain receipt text."""
+    if not text:
+        return 0.0
+
+    lines = [ln.strip() for ln in str(text).splitlines() if ln.strip()]
+    preferred_patterns = [
+        r"(?i)grand\s*total",
+        r"(?i)amount\s*due",
+        r"(?i)total\s*due",
+        r"(?i)total\s*bayar",
+        r"(?i)jumlah\s*bayar",
+        r"(?i)total\s*payment",
+        r"(?i)net\s*total",
+        r"(?i)total",
+    ]
+    money_pattern = r"[-+]?\d[\d.,]*"
+
+    def find_amount_in_line(line):
+        matches = re.findall(money_pattern, line)
+        if not matches:
+            return 0.0
+        # Receipts often print the payable amount as the last number on the line.
+        return _coerce_amount(matches[-1])
+
+    for pat in preferred_patterns:
+        for line in reversed(lines):
+            if re.search(pat, line):
+                amount = find_amount_in_line(line)
+                if amount > 0:
+                    return amount
+
+    # Last resort: choose the largest amount visible.
+    all_numbers = re.findall(money_pattern, text)
+    if not all_numbers:
+        return 0.0
+    return max((_coerce_amount(n) for n in all_numbers), default=0.0)
+
+
+def _normalize_text(value):
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9\s]", " ", str(value or "").lower())).strip()
+
+
+def _is_generic_category(name):
+    normalized = _normalize_text(name)
+    return normalized in {
+        "makanan",
+        "minuman",
+        "food",
+        "drink",
+        "groceries",
+        "restaurant",
+        "cafe",
+        "others",
+        "other",
+        "misc",
+        "miscellaneous",
+    }
+
+
+def _is_allowed_specific_category(category_name, allowed_categories):
+    normalized = _normalize_text(category_name)
+    if not normalized:
+        return False
+    return any(_normalize_text(item) == normalized for item in allowed_categories)
+
+
+def _category_supported_by_text(category_name, text):
+    """Only accept a category if the raw model text contains the category or a strong cue."""
+    if not category_name or not text:
+        return False
+
+    category_norm = _normalize_text(category_name)
+    raw_norm = _normalize_text(text)
+
+    if category_norm and category_norm in raw_norm:
+        return True
+
+    cues = {
+        "makanan": ["food", "meal", "rice", "lunch", "dinner", "breakfast", "restaurant", "cafe"],
+        "minuman": ["drink", "beverage", "coffee", "tea", "juice", "water"],
+        "salary": ["salary", "payroll", "wage", "gaji"],
+        "bank": ["bank", "transfer", "atm", "withdrawal"],
+        "cash": ["cash", "tunai"],
+        "freelance": ["freelance", "invoice", "project"],
+    }
+
+    for key, words in cues.items():
+        if category_norm == key or category_norm.endswith(" " + key):
+            return any(word in raw_norm for word in words)
+
+    return False
+
+
+def _category_keyword_map(tx_type):
+    if tx_type == "income":
+        return {
+            "salary": ["salary", "payroll", "wage", "gaji"],
+            "bank": ["bank", "transfer", "atm", "withdrawal", "deposit"],
+            "cash": ["cash", "tunai"],
+            "freelance": ["freelance", "invoice", "project", "client"],
+        }
+
+    return {
+        "makanan": [
+            "food", "meal", "rice", "lunch", "dinner", "breakfast",
+            "restaurant", "cafe", "warung", "warteg", "bakso", "mie",
+            "soto", "ayam", "nasi", "ayam geprek", "burger", "pizza",
+        ],
+        "minuman": [
+            "drink", "beverage", "coffee", "tea", "juice", "water",
+            "kopi", "latte", "espresso", "cappuccino", "starbucks", "boba",
+        ],
+    }
+
+
+def _guess_likely_category_match(store_name, category_name, raw_text, tx_type):
+    """Infer a likely category from the AI text and receipt clues without using the existing category list."""
+    raw_norm = _normalize_text(raw_text)
+    store_norm = _normalize_text(store_name)
+    category_norm = _normalize_text(category_name)
+    keyword_map = _category_keyword_map(tx_type)
+
+    best_category = ""
+    best_score = 0
+
+    for candidate, keywords in keyword_map.items():
+        score = 0
+
+        if category_norm == candidate:
+            score += 6
+        if category_norm and candidate in category_norm:
+            score += 4
+        if candidate in store_norm:
+            score += 3
+        if candidate in raw_norm:
+            score += 2
+
+        for keyword in keywords:
+            if keyword in store_norm:
+                score += 4
+            if keyword in raw_norm:
+                score += 2
+
+        if score > best_score:
+            best_score = score
+            best_category = candidate
+
+    if best_score <= 0:
+        return ""
+    return best_category
+
+
+def _extract_transaction_fields_from_text(text):
+    """Best-effort extraction when the model returns non-JSON text."""
+    if not text:
+        return {}
+
+    raw = text.strip()
+
+    amount = 0.0
+    store_name = ""
+    date_str = ""
+    category_name = ""
+    description = ""
+
+    amount_match = re.search(
+        r'(?i)(?:"amount"\s*:\s*"?([^"\n,}]+)|\b(?:total|amount|grand\s*total)\b[^0-9\-]*([-+]?\d[\d.,]*))',
+        raw,
+    )
+    if amount_match:
+        amount = _coerce_amount(amount_match.group(1) or amount_match.group(2) or "")
+
+    store_match = re.search(
+        r'(?i)"(?:store_name|merchant|vendor|shop|store)"\s*:\s*"([^"]+)"',
+        raw,
+    )
+    if not store_match:
+        store_match = re.search(r'(?im)^\s*(?:store|merchant|vendor|shop)\s*[:=-]\s*(.+)$', raw)
+    if store_match:
+        store_name = (store_match.group(1) or "").strip()
+
+    category_match = re.search(r'(?i)"(?:category_name|category)"\s*:\s*"([^"]+)"', raw)
+    if not category_match:
+        category_match = re.search(r'(?im)^\s*category\s*[:=-]\s*(.+)$', raw)
+    if category_match:
+        category_name = (category_match.group(1) or "").strip()
+
+    description_match = re.search(r'(?i)"description"\s*:\s*"([^"]+)"', raw)
+    if not description_match:
+        description_match = re.search(r'(?im)^\s*description\s*[:=-]\s*(.+)$', raw)
+    if description_match:
+        description = (description_match.group(1) or "").strip()
+
+    iso_match = re.search(r'\b(\d{4}-\d{2}-\d{2})\b', raw)
+    if iso_match:
+        date_str = iso_match.group(1)
+    else:
+        slash_match = re.search(r'\b(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\b', raw)
+        if slash_match:
+            d, m, y = slash_match.groups()
+            y = f"20{y}" if len(y) == 2 else y
+            try:
+                date_str = datetime(int(y), int(m), int(d)).strftime("%Y-%m-%d")
+            except Exception:
+                date_str = ""
+
+    return {
+        "amount": amount,
+        "store_name": store_name,
+        "date": date_str,
+        "category_name": category_name,
+        "description": description,
+    }
+
+
+def _save_entry_image(uploaded_file):
+    """Save an uploaded image and return its static-relative path."""
+    if uploaded_file is None or not uploaded_file.filename:
+        return None
+
+    filename = secure_filename(uploaded_file.filename)
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in ALLOWED_IMAGE_EXTENSIONS:
+        return None
+
+    os.makedirs(ENTRY_UPLOAD_DIR, exist_ok=True)
+    saved_name = f"{uuid.uuid4().hex}{ext}"
+    full_path = os.path.join(ENTRY_UPLOAD_DIR, saved_name)
+    uploaded_file.save(full_path)
+    return f"{ENTRY_UPLOAD_REL_DIR.replace(os.sep, '/')}/{saved_name}"
 
 # ---------------------------------------------------------------------------
 # Database helpers
@@ -61,6 +405,7 @@ def init_db():
             description TEXT    NOT NULL DEFAULT '',
             date        TEXT    NOT NULL,
             category_id INTEGER NOT NULL,
+            receipt_image TEXT  DEFAULT NULL,
             created_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
             FOREIGN KEY (category_id) REFERENCES categories(id)
         );
@@ -88,41 +433,21 @@ def init_db():
             description     TEXT    NOT NULL DEFAULT '',
             date            TEXT    NOT NULL,
             category_id     INTEGER NOT NULL,
+            receipt_image   TEXT    DEFAULT NULL,
             created_at      TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
             FOREIGN KEY (category_id) REFERENCES income_categories(id)
         );
-
-        CREATE TABLE IF NOT EXISTS stocks (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            ticker          TEXT    NOT NULL,
-            name            TEXT    NOT NULL DEFAULT '',
-            lots            INTEGER NOT NULL DEFAULT 1,
-            shares_per_lot  INTEGER NOT NULL DEFAULT 100,
-            avg_buy_price   REAL    NOT NULL DEFAULT 0,
-            current_price   REAL    NOT NULL DEFAULT 0,
-            last_updated    TEXT    DEFAULT NULL,
-            created_at      TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
-        );
-
-        CREATE TABLE IF NOT EXISTS watchlist_stocks (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            ticker          TEXT    NOT NULL UNIQUE,
-            name            TEXT    NOT NULL DEFAULT '',
-            current_price   REAL    NOT NULL DEFAULT 0,
-            prev_close      REAL    NOT NULL DEFAULT 0,
-            last_updated    TEXT    DEFAULT NULL,
-            created_at      TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
-        );
-
-        CREATE TABLE IF NOT EXISTS stock_pl_history (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            date            TEXT    NOT NULL UNIQUE,
-            total_value     REAL    NOT NULL DEFAULT 0,
-            total_investment REAL   NOT NULL DEFAULT 0,
-            unrealized_pl   REAL    NOT NULL DEFAULT 0,
-            created_at      TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
-        );
     """)
+
+    # Lightweight migration for older DBs created before receipt_image columns existed.
+    expense_cols = [r[1] for r in db.execute("PRAGMA table_info(expenses)").fetchall()]
+    if "receipt_image" not in expense_cols:
+        db.execute("ALTER TABLE expenses ADD COLUMN receipt_image TEXT DEFAULT NULL")
+
+    income_cols = [r[1] for r in db.execute("PRAGMA table_info(income)").fetchall()]
+    if "receipt_image" not in income_cols:
+        db.execute("ALTER TABLE income ADD COLUMN receipt_image TEXT DEFAULT NULL")
+    db.commit()
 
     # Seed default expense categories
     cursor = db.execute("SELECT COUNT(*) FROM categories")
@@ -136,7 +461,6 @@ def init_db():
     if cursor.fetchone()[0] == 0:
         db.execute("INSERT INTO income_categories (name) VALUES ('Bank')")
         db.execute("INSERT INTO income_categories (name) VALUES ('Cash')")
-        db.execute("INSERT INTO income_categories (name) VALUES ('Stocks Dividend')")
         db.execute("INSERT INTO income_categories (name) VALUES ('Salary')")
         db.execute("INSERT INTO income_categories (name) VALUES ('Freelance')")
         db.commit()
@@ -203,16 +527,51 @@ def dashboard():
     row = db.execute("SELECT COUNT(*) AS cnt FROM expenses").fetchone()
     total_entries = row["cnt"]
 
+    return render_template(
+        "dashboard.html",
+        today_expense=today_expense,
+        month_expense=month_expense,
+        all_time_expense=all_time_expense,
+        today_income=today_income,
+        month_income=month_income,
+        all_time_income=all_time_income,
+        total_entries=total_entries,
+        today_str=today_str,
+    )
+
+
+@app.route("/expenses")
+def expenses_page():
+    db = get_db()
+    today_str = date.today().isoformat()
+    month_start = date.today().replace(day=1).isoformat()
+
+    row = db.execute(
+        "SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE date = ?",
+        (today_str,)
+    ).fetchone()
+    today_total = row["total"]
+
+    row = db.execute(
+        "SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE date >= ?",
+        (month_start,)
+    ).fetchone()
+    month_total = row["total"]
+
+    row = db.execute(
+        "SELECT COALESCE(SUM(amount), 0) AS total FROM expenses"
+    ).fetchone()
+    all_time_total = row["total"]
+
     # Recent expenses grouped by date (last 50 entries)
     expenses = db.execute("""
-        SELECT e.id, e.amount, e.description, e.date, c.name AS category
+        SELECT e.id, e.amount, e.description, e.date, e.receipt_image, c.name AS category
         FROM expenses e
         JOIN categories c ON e.category_id = c.id
         ORDER BY e.date DESC, e.created_at DESC
         LIMIT 50
     """).fetchall()
 
-    # Group by date
     grouped = {}
     for exp in expenses:
         d = exp["date"]
@@ -220,12 +579,10 @@ def dashboard():
             grouped[d] = []
         grouped[d].append(exp)
 
-    # Categories for the add-expense form
     categories = db.execute(
         "SELECT id, name FROM categories ORDER BY name"
     ).fetchall()
 
-    # Top categories this month
     top_cats = db.execute("""
         SELECT c.name, COALESCE(SUM(e.amount), 0) AS total
         FROM expenses e
@@ -237,17 +594,13 @@ def dashboard():
     """, (month_start,)).fetchall()
 
     return render_template(
-        "dashboard.html",
-        today_expense=today_expense,
-        month_expense=month_expense,
-        all_time_expense=all_time_expense,
-        today_income=today_income,
-        month_income=month_income,
-        all_time_income=all_time_income,
-        total_entries=total_entries,
+        "expenses.html",
         grouped_expenses=grouped,
         categories=categories,
         top_categories=top_cats,
+        today_total=today_total,
+        month_total=month_total,
+        all_time_total=all_time_total,
         today_str=today_str,
     )
 
@@ -262,25 +615,26 @@ def add_expense():
     description = request.form.get("description", "").strip()
     expense_date = request.form.get("date", date.today().isoformat()).strip()
     category_id = request.form.get("category_id", "").strip()
+    receipt_image = _save_entry_image(request.files.get("receipt_image"))
 
     if not amount or not category_id:
         flash("Amount and category are required.", "error")
-        return redirect(url_for("dashboard"))
+        return redirect(url_for("expenses_page"))
 
     try:
         amount = float(amount)
     except ValueError:
         flash("Invalid amount.", "error")
-        return redirect(url_for("dashboard"))
+        return redirect(url_for("expenses_page"))
 
     db = get_db()
     db.execute(
-        "INSERT INTO expenses (amount, description, date, category_id) VALUES (?, ?, ?, ?)",
-        (amount, description, expense_date, int(category_id))
+        "INSERT INTO expenses (amount, description, date, category_id, receipt_image) VALUES (?, ?, ?, ?, ?)",
+        (amount, description, expense_date, int(category_id), receipt_image)
     )
     db.commit()
     flash("Expense added.", "success")
-    return redirect(url_for("dashboard"))
+    return redirect(url_for("expenses_page"))
 
 
 @app.route("/expenses/delete/<int:expense_id>", methods=["POST"])
@@ -292,7 +646,7 @@ def delete_expense(expense_id):
     flash("Expense deleted.", "success")
     if redirect_to:
         return redirect(redirect_to)
-    return redirect(url_for("dashboard"))
+    return redirect(url_for("expenses_page"))
 
 
 @app.route("/expenses/edit/<int:expense_id>", methods=["POST"])
@@ -307,7 +661,7 @@ def edit_expense(expense_id):
         flash("Amount, date, and category are required.", "error")
         if redirect_to:
             return redirect(redirect_to)
-        return redirect(url_for("dashboard"))
+        return redirect(url_for("expenses_page"))
 
     try:
         amount = float(amount)
@@ -315,7 +669,7 @@ def edit_expense(expense_id):
         flash("Invalid amount.", "error")
         if redirect_to:
             return redirect(redirect_to)
-        return redirect(url_for("dashboard"))
+        return redirect(url_for("expenses_page"))
 
     db = get_db()
     db.execute(
@@ -326,7 +680,7 @@ def edit_expense(expense_id):
     flash("Expense updated.", "success")
     if redirect_to:
         return redirect(redirect_to)
-    return redirect(url_for("dashboard"))
+    return redirect(url_for("expenses_page"))
 
 
 # ---------------------------------------------------------------------------
@@ -359,7 +713,7 @@ def income_page():
 
     # Recent income entries
     entries = db.execute("""
-        SELECT i.id, i.amount, i.description, i.date, ic.name AS category
+        SELECT i.id, i.amount, i.description, i.date, i.receipt_image, ic.name AS category
         FROM income i
         JOIN income_categories ic ON i.category_id = ic.id
         ORDER BY i.date DESC, i.created_at DESC
@@ -408,6 +762,7 @@ def add_income():
     description = request.form.get("description", "").strip()
     income_date = request.form.get("date", date.today().isoformat()).strip()
     category_id = request.form.get("category_id", "").strip()
+    receipt_image = _save_entry_image(request.files.get("receipt_image"))
 
     if not amount or not category_id:
         flash("Amount and source are required.", "error")
@@ -421,8 +776,8 @@ def add_income():
 
     db = get_db()
     db.execute(
-        "INSERT INTO income (amount, description, date, category_id) VALUES (?, ?, ?, ?)",
-        (amount, description, income_date, int(category_id))
+        "INSERT INTO income (amount, description, date, category_id, receipt_image) VALUES (?, ?, ?, ?, ?)",
+        (amount, description, income_date, int(category_id), receipt_image)
     )
     db.commit()
     flash("Income added.", "success")
@@ -752,15 +1107,23 @@ def categories():
 def add_category():
     name = request.form.get("name", "").strip()
     if not name:
+        if request.headers.get("X-Requested-With") == "fetch":
+            return jsonify({"ok": False, "error": "Category name is required."}), 400
         flash("Category name is required.", "error")
         return redirect(url_for("categories"))
 
     db = get_db()
     try:
-        db.execute("INSERT INTO categories (name) VALUES (?)", (name,))
+        cursor = db.execute("INSERT INTO categories (name) VALUES (?)", (name,))
         db.commit()
+        if request.headers.get("X-Requested-With") == "fetch":
+            row = db.execute("SELECT id, name FROM categories WHERE id = ?", (cursor.lastrowid,)).fetchone()
+            return jsonify({"ok": True, "id": row["id"], "name": row["name"]})
         flash(f"Category '{name}' added.", "success")
     except sqlite3.IntegrityError:
+        if request.headers.get("X-Requested-With") == "fetch":
+            row = db.execute("SELECT id, name FROM categories WHERE name = ?", (name,)).fetchone()
+            return jsonify({"ok": True, "id": row["id"], "name": row["name"], "existing": True})
         flash(f"Category '{name}' already exists.", "error")
     return redirect(url_for("categories"))
 
@@ -804,15 +1167,23 @@ def delete_category(cat_id):
 def add_income_category():
     name = request.form.get("name", "").strip()
     if not name:
+        if request.headers.get("X-Requested-With") == "fetch":
+            return jsonify({"ok": False, "error": "Category name is required."}), 400
         flash("Category name is required.", "error")
         return redirect(url_for("categories"))
 
     db = get_db()
     try:
-        db.execute("INSERT INTO income_categories (name) VALUES (?)", (name,))
+        cursor = db.execute("INSERT INTO income_categories (name) VALUES (?)", (name,))
         db.commit()
+        if request.headers.get("X-Requested-With") == "fetch":
+            row = db.execute("SELECT id, name FROM income_categories WHERE id = ?", (cursor.lastrowid,)).fetchone()
+            return jsonify({"ok": True, "id": row["id"], "name": row["name"]})
         flash(f"Income source '{name}' added.", "success")
     except sqlite3.IntegrityError:
+        if request.headers.get("X-Requested-With") == "fetch":
+            row = db.execute("SELECT id, name FROM income_categories WHERE name = ?", (name,)).fetchone()
+            return jsonify({"ok": True, "id": row["id"], "name": row["name"], "existing": True})
         flash(f"Income source '{name}' already exists.", "error")
     return redirect(url_for("categories"))
 
@@ -950,364 +1321,363 @@ def delete_wishlist(item_id):
 
 
 # ---------------------------------------------------------------------------
-# Routes — Stocks Portfolio
+# API — for AJAX calls (chart data)
 # ---------------------------------------------------------------------------
 
-def _fetch_yahoo_price(ticker):
-    """Fetch current price and info from Yahoo Finance. Returns dict or None."""
-    import math
 
-    def _safe_float(val):
-        """Convert to float, treating NaN/None as 0."""
-        try:
-            f = float(val)
-            return 0 if math.isnan(f) else f
-        except (TypeError, ValueError):
-            return 0
+@app.route("/api/recognize-transaction-photo", methods=["POST"])
+def recognize_transaction_photo():
+    """Analyze a transaction photo and return structured draft fields."""
+    if genai is None or types is None:
+        return jsonify({
+            "ok": False,
+            "error": "Google GenAI SDK is not installed. Add 'google-genai' to requirements and install dependencies."
+        }), 500
 
-    try:
-        import yfinance as yf
-        t = yf.Ticker(ticker)
+    api_key = os.environ.get("GEMINI_API_KEY", API_KEY).strip()
+    if not api_key:
+        return jsonify({
+            "ok": False,
+            "error": "Missing GEMINI_API_KEY environment variable."
+        }), 400
 
-        price = 0
-        name = ticker.upper()
-        prev_close = 0
+    file = request.files.get("photo")
+    if file is None or not file.filename:
+        return jsonify({"ok": False, "error": "Photo file is required."}), 400
 
-        # Try fast_info first — must use bracket access, .get() returns None
-        try:
-            fi = t.fast_info
-            price = _safe_float(fi['lastPrice'])
-            prev_close = _safe_float(fi['previousClose'])
-        except Exception:
-            pass
+    mime_type = (file.mimetype or "").strip().lower()
+    if mime_type not in {"image/jpeg", "image/jpg", "image/png", "image/webp"}:
+        return jsonify({
+            "ok": False,
+            "error": "Unsupported image type. Use JPG, PNG, or WEBP."
+        }), 400
 
-        # If lastPrice was NaN/0, try previousClose as the price
-        if price == 0 and prev_close > 0:
-            price = prev_close
+    image_bytes = file.read()
+    if not image_bytes:
+        return jsonify({"ok": False, "error": "Uploaded file is empty."}), 400
+    if len(image_bytes) > 8 * 1024 * 1024:
+        return jsonify({"ok": False, "error": "Image is too large (max 8MB)."}), 400
 
-        # Fallback: get from recent history
-        if price == 0:
-            try:
-                hist = t.history(period="5d")
-                if not hist.empty:
-                    closes = hist["Close"].dropna()
-                    if not closes.empty:
-                        price = _safe_float(closes.iloc[-1])
-                        if len(closes) >= 2:
-                            prev_close = _safe_float(closes.iloc[-2])
-            except Exception:
-                pass
+    target = request.form.get("target", "").strip().lower()
+    if target not in {"expense", "income", "auto"}:
+        target = "auto"
 
-        # Try to get company name
-        try:
-            info = t.info
-            name = info.get("shortName") or info.get("longName") or name
-        except Exception:
-            pass
-
-        if price == 0:
-            return None
-
-        return {"price": price, "name": name, "prev_close": prev_close}
-    except Exception:
-        return None
-
-
-def _record_pl_snapshot(db):
-    """Record today's portfolio P/L snapshot. Updates if today's entry exists."""
-    today_str = date.today().isoformat()
-    holdings = db.execute("SELECT * FROM stocks").fetchall()
-
-    total_value = 0
-    total_investment = 0
-    for h in holdings:
-        shares = h["lots"] * h["shares_per_lot"]
-        total_value += h["current_price"] * shares
-        total_investment += h["avg_buy_price"] * shares
-
-    unrealized_pl = total_value - total_investment
-
-    # Upsert: replace if today already has an entry
-    db.execute(
-        """INSERT INTO stock_pl_history (date, total_value, total_investment, unrealized_pl)
-           VALUES (?, ?, ?, ?)
-           ON CONFLICT(date) DO UPDATE SET
-               total_value = excluded.total_value,
-               total_investment = excluded.total_investment,
-               unrealized_pl = excluded.unrealized_pl,
-               created_at = datetime('now','localtime')""",
-        (today_str, total_value, total_investment, unrealized_pl)
-    )
-    db.commit()
-
-
-@app.route("/stocks")
-def stocks_page():
     db = get_db()
 
-    holdings = db.execute("""
-        SELECT * FROM stocks ORDER BY ticker ASC
-    """).fetchall()
+    tx_type = "income" if target == "income" else "expense"
+    today_default = datetime.now().strftime("%Y-%m-%d")
 
-    watchlist = db.execute("""
-        SELECT * FROM watchlist_stocks ORDER BY ticker ASC
-    """).fetchall()
+    system_prompt = f"""
+Analyze this {'receipt/invoice' if tx_type == 'expense' else 'payment proof/transfer screenshot'} image.
+Extract financial transaction data and return ONLY a valid JSON array, no markdown, no explanation.
+Format:
+[{{"date":"YYYY-MM-DD","vendor":"name","amount":numeric_only,"category":"category label inferred from the receipt","description":"short description","items":[{{"name":"item","amount":numeric_optional}}]}}]
+- amount must be a plain number (no Rp, no commas)
+- Prioritize the final payable total and not line-item prices (e.g. GRAND TOTAL, TOTAL BAYAR, AMOUNT DUE)
+- If date is unclear use today: {today_default}
+- Category rules:
+  - infer the most fitting category from the receipt itself
+  - do not rely on any existing category list
+  - if category is unclear, return a short sensible category guess anyway
+- Description rules:
+    - for expense, describe purchased objects/items, not the store name
+    - if there are multiple objects, use the most expensive one or two items, then append "and others"
+    - keep it specific (for example: "Salmon and shrimp and others")
+    - keep it concise and useful for an expense ledger
+- Return one object for the total, not per line item
+""".strip()
 
-    # Portfolio calculations
-    total_value = 0
-    total_investment = 0
-    for h in holdings:
-        shares = h["lots"] * h["shares_per_lot"]
-        total_value += h["current_price"] * shares
-        total_investment += h["avg_buy_price"] * shares
-
-    unrealized_pl = total_value - total_investment
-    pl_pct = (unrealized_pl / total_investment * 100) if total_investment > 0 else 0
-
-    # P/L history for chart (last 30 days)
-    pl_history = db.execute("""
-        SELECT date, total_value, total_investment, unrealized_pl
-        FROM stock_pl_history
-        ORDER BY date DESC
-        LIMIT 30
-    """).fetchall()
-    # Reverse so it's oldest → newest for the chart
-    pl_history = list(reversed(pl_history))
-
-    return render_template(
-        "stocks.html",
-        holdings=holdings,
-        watchlist=watchlist,
-        total_value=total_value,
-        total_investment=total_investment,
-        unrealized_pl=unrealized_pl,
-        pl_pct=pl_pct,
-        pl_history=pl_history,
+    user_prompt = (
+        f"target={target}\n"
+        "infer_categories_independently=true"
     )
 
-
-@app.route("/stocks/add", methods=["POST"])
-def add_stock():
-    ticker = request.form.get("ticker", "").strip().upper()
-    lots = request.form.get("lots", "1").strip()
-    shares_per_lot = request.form.get("shares_per_lot", "100").strip()
-    avg_buy_price = request.form.get("avg_buy_price", "0").strip()
-
-    if not ticker:
-        flash("Ticker is required.", "error")
-        return redirect(url_for("stocks_page"))
-
-    try:
-        lots = int(lots)
-        shares_per_lot = int(shares_per_lot)
-        avg_buy_price = float(avg_buy_price)
-    except ValueError:
-        flash("Invalid numeric values.", "error")
-        return redirect(url_for("stocks_page"))
-
-    # Try to fetch current price from Yahoo Finance
-    info = _fetch_yahoo_price(ticker)
-    current_price = info["price"] if info else 0
-    name = info["name"] if info else ticker
-
-    db = get_db()
-    db.execute(
-        """INSERT INTO stocks (ticker, name, lots, shares_per_lot, avg_buy_price, current_price, last_updated)
-           VALUES (?, ?, ?, ?, ?, ?, datetime('now','localtime'))""",
-        (ticker, name, lots, shares_per_lot, avg_buy_price, current_price)
+    # Some models (for example Gemma chat models) do not support developer/system instructions.
+    # In that case we prepend the rules into the user content instead.
+    request_prompt = (
+        system_prompt + "\n\n" + user_prompt
+        if GEMINI_MODEL.startswith("gemma-") else user_prompt
     )
-    db.commit()
-    flash(f"Stock '{ticker}' added to portfolio.", "success")
-    return redirect(url_for("stocks_page"))
-
-
-@app.route("/stocks/edit/<int:stock_id>", methods=["POST"])
-def edit_stock(stock_id):
-    ticker = request.form.get("ticker", "").strip().upper()
-    lots = request.form.get("lots", "1").strip()
-    shares_per_lot = request.form.get("shares_per_lot", "100").strip()
-    avg_buy_price = request.form.get("avg_buy_price", "0").strip()
-
-    if not ticker:
-        flash("Ticker is required.", "error")
-        return redirect(url_for("stocks_page"))
 
     try:
-        lots = int(lots)
-        shares_per_lot = int(shares_per_lot)
-        avg_buy_price = float(avg_buy_price)
-    except ValueError:
-        flash("Invalid numeric values.", "error")
-        return redirect(url_for("stocks_page"))
+        client = genai.Client(api_key=api_key)
+        config_kwargs = {
+            "system_instruction": None if GEMINI_MODEL.startswith("gemma-") else system_prompt,
+            "temperature": 0.1,
+        }
+        if not GEMINI_MODEL.startswith("gemma-"):
+            config_kwargs["response_mime_type"] = "application/json"
 
-    db = get_db()
-    db.execute(
-        """UPDATE stocks SET ticker = ?, lots = ?, shares_per_lot = ?, avg_buy_price = ?
-           WHERE id = ?""",
-        (ticker, lots, shares_per_lot, avg_buy_price, stock_id)
-    )
-    db.commit()
-    flash(f"Stock '{ticker}' updated.", "success")
-    return redirect(url_for("stocks_page"))
-
-
-@app.route("/stocks/delete/<int:stock_id>", methods=["POST"])
-def delete_stock(stock_id):
-    db = get_db()
-    db.execute("DELETE FROM stocks WHERE id = ?", (stock_id,))
-    db.commit()
-    flash("Stock removed from portfolio.", "success")
-    return redirect(url_for("stocks_page"))
-
-
-@app.route("/stocks/update-price/<int:stock_id>", methods=["POST"])
-def update_stock_price(stock_id):
-    """Manually set a stock's current price."""
-    price = request.form.get("current_price", "0").strip()
-    try:
-        price = float(price)
-    except ValueError:
-        flash("Invalid price.", "error")
-        return redirect(url_for("stocks_page"))
-
-    db = get_db()
-    db.execute(
-        "UPDATE stocks SET current_price = ?, last_updated = datetime('now','localtime') WHERE id = ?",
-        (price, stock_id)
-    )
-    db.commit()
-    _record_pl_snapshot(db)
-    flash("Price updated.", "success")
-    return redirect(url_for("stocks_page"))
-
-
-@app.route("/stocks/refresh-all", methods=["POST"])
-def refresh_all_stock_prices():
-    """Refresh all portfolio + watchlist prices from Yahoo Finance."""
-    import time as _time
-    db = get_db()
-    updated = 0
-    errors = 0
-
-    # Update portfolio stocks
-    holdings = db.execute("SELECT id, ticker FROM stocks").fetchall()
-    for h in holdings:
-        info = _fetch_yahoo_price(h["ticker"])
-        if info:
-            db.execute(
-                "UPDATE stocks SET current_price = ?, name = ?, last_updated = datetime('now','localtime') WHERE id = ?",
-                (info["price"], info["name"], h["id"])
-            )
-            updated += 1
-        else:
-            errors += 1
-        _time.sleep(0.3)
-
-    # Update watchlist stocks
-    watchlist = db.execute("SELECT id, ticker FROM watchlist_stocks").fetchall()
-    for w in watchlist:
-        info = _fetch_yahoo_price(w["ticker"])
-        if info:
-            db.execute(
-                """UPDATE watchlist_stocks
-                   SET current_price = ?, name = ?, prev_close = ?, last_updated = datetime('now','localtime')
-                   WHERE id = ?""",
-                (info["price"], info["name"], info["prev_close"], w["id"])
-            )
-            updated += 1
-        else:
-            errors += 1
-        _time.sleep(0.3)
-
-    db.commit()
-    msg = f"Updated {updated} ticker(s)."
-    if errors:
-        msg += f" {errors} failed."
-    flash(msg, "success" if errors == 0 else "error")
-
-    # Auto-snapshot today's P/L after refresh
-    _record_pl_snapshot(db)
-
-    return redirect(url_for("stocks_page"))
-
-
-@app.route("/stocks/snapshot", methods=["POST"])
-def record_stock_snapshot():
-    """Manually record today's P/L snapshot."""
-    db = get_db()
-    _record_pl_snapshot(db)
-    flash("Today's P/L snapshot recorded.", "success")
-    return redirect(url_for("stocks_page"))
-
-
-# ---------------------------------------------------------------------------
-# Routes — Watchlist Stocks
-# ---------------------------------------------------------------------------
-
-@app.route("/watchlist-stocks/add", methods=["POST"])
-def add_watchlist_stock():
-    ticker = request.form.get("ticker", "").strip().upper()
-    if not ticker:
-        flash("Ticker is required.", "error")
-        return redirect(url_for("stocks_page"))
-
-    info = _fetch_yahoo_price(ticker)
-    current_price = info["price"] if info else 0
-    name = info["name"] if info else ticker
-    prev_close = info["prev_close"] if info else 0
-
-    db = get_db()
-    try:
-        db.execute(
-            """INSERT INTO watchlist_stocks (ticker, name, current_price, prev_close, last_updated)
-               VALUES (?, ?, ?, ?, datetime('now','localtime'))""",
-            (ticker, name, current_price, prev_close)
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=[
+                request_prompt,
+                types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+            ],
+            config=types.GenerateContentConfig(**config_kwargs),
         )
-        db.commit()
-        flash(f"'{ticker}' added to watchlist.", "success")
-    except sqlite3.IntegrityError:
-        flash(f"'{ticker}' is already in your watchlist.", "error")
-    return redirect(url_for("stocks_page"))
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"Gemini request failed: {exc}"}), 500
 
+    raw_response_text = getattr(response, "text", "")
+    parsed = _extract_json_object(raw_response_text)
+    if not isinstance(parsed, dict):
+        parsed_arr = _extract_json_array(raw_response_text)
+        if isinstance(parsed_arr, list) and parsed_arr and isinstance(parsed_arr[0], dict):
+            parsed = parsed_arr[0]
+    if not isinstance(parsed, dict):
+        parsed = _extract_transaction_fields_from_text(raw_response_text)
+    if not isinstance(parsed, dict):
+        parsed = {}
 
-@app.route("/watchlist-stocks/delete/<int:item_id>", methods=["POST"])
-def delete_watchlist_stock(item_id):
-    db = get_db()
-    db.execute("DELETE FROM watchlist_stocks WHERE id = ?", (item_id,))
-    db.commit()
-    flash("Removed from watchlist.", "success")
-    return redirect(url_for("stocks_page"))
+    if not any([
+        parsed.get("amount"),
+        parsed.get("store_name"),
+        parsed.get("date"),
+        parsed.get("category_name"),
+        parsed.get("description"),
+    ]):
+        return jsonify({
+            "ok": False,
+            "error": "Could not parse model response.",
+            "raw_response": (raw_response_text or "")[:400],
+        }), 500
 
+    amount_val = _coerce_amount(parsed.get("amount", 0))
+    if amount_val <= 0:
+        amount_val = _best_guess_total_from_text(raw_response_text)
 
-# ---------------------------------------------------------------------------
-# API — for AJAX calls (chart data, stock prices, etc.)
-# ---------------------------------------------------------------------------
+    date_val = str(parsed.get("date", "")).strip()
+    if date_val:
+        try:
+            datetime.strptime(date_val, "%Y-%m-%d")
+        except ValueError:
+            date_val = ""
 
-@app.route("/api/stock-price/<ticker>")
-def api_stock_price(ticker):
-    """Fetch live price for a single ticker via Yahoo Finance."""
-    info = _fetch_yahoo_price(ticker.upper())
-    if info:
-        return jsonify({"ok": True, "ticker": ticker.upper(), **info})
-    return jsonify({"ok": False, "error": "Could not fetch price."}), 404
+    store_name_val = str(parsed.get("store_name") or parsed.get("vendor") or "").strip()
+    description_val = str(parsed.get("description") or "").strip()
+    category_name_raw = str(parsed.get("category_name") or parsed.get("category") or "").strip()
 
+    def _shorten_text(text, max_len=42):
+        value = str(text or "").strip()
+        if len(value) <= max_len:
+            return value
 
-@app.route("/api/stock-pl-history")
-def api_stock_pl_history():
-    """Return P/L history for charting."""
-    db = get_db()
-    rows = db.execute("""
-        SELECT date, total_value, total_investment, unrealized_pl
-        FROM stock_pl_history
-        ORDER BY date ASC
-        LIMIT 90
-    """).fetchall()
-    return jsonify([{
-        "date": r["date"],
-        "total_value": r["total_value"],
-        "total_investment": r["total_investment"],
-        "unrealized_pl": r["unrealized_pl"]
-    } for r in rows])
+        words = value.split()
+        compact_words = []
+        for word in words:
+            candidate = " ".join(compact_words + [word])
+            if len(candidate) > max_len:
+                break
+            compact_words.append(word)
+
+        if compact_words:
+            return " ".join(compact_words)
+        return value[:max_len].rstrip()
+
+    def _clean_item_label(label):
+        cleaned = re.sub(r'(?i)^\s*(?:and|dan|&|\+)\s+', '', str(label or '').strip())
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip(' .,-')
+        return _shorten_text(cleaned, max_len=24)
+
+    def _generalize_description(description_text, category_name):
+        text = str(description_text or "").strip()
+        if not text:
+            return ""
+
+        lowered = text.lower()
+        has_multi_item_cues = any(token in lowered for token in [",", ";", " / ", " and ", " & ", " + "])
+        if not has_multi_item_cues:
+            return text
+
+        parts = re.split(r'\s*(?:,|;|/|\band\b|&|\+)\s*', text, flags=re.IGNORECASE)
+        cleaned_parts = []
+        seen = set()
+        for part in parts:
+            cleaned = re.sub(
+                r'(?i)\b\d+(?:[.,]\d+)?\s*(?:x|pcs?|pc|pack|packs|kg|g|gr|gram|ml|l|ltr|btl|bottle|botol|item|items)\b',
+                '',
+                part,
+            )
+            cleaned = re.sub(r'\s+', ' ', cleaned).strip(' .,-')
+            if not cleaned:
+                continue
+
+            normalized = cleaned.lower()
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            cleaned_parts.append(cleaned)
+
+        if len(cleaned_parts) >= 3:
+            return f"{cleaned_parts[0]} and {cleaned_parts[1]} and others"
+        if len(cleaned_parts) == 2:
+            return f"{cleaned_parts[0]} and {cleaned_parts[1]}"
+        if len(cleaned_parts) == 1:
+            return cleaned_parts[0]
+
+        category = str(category_name or "").strip()
+        if category:
+            return f"{category} purchases"
+        return "Mixed purchases"
+
+    # Normalize model output in case it still returns item lists split by commas.
+    if description_val:
+        description_val = _generalize_description(description_val, category_name_raw)
+        description_val = _shorten_text(description_val, max_len=42)
+
+    def _collect_items(raw_items):
+        if not isinstance(raw_items, list):
+            return []
+
+        def _infer_amount_from_name(name_text):
+            text = str(name_text or "")
+            if not text:
+                return 0.0
+
+            # Capture numeric tokens from item text (e.g. "Tea 350ml 12000").
+            candidates = re.findall(r'\d+(?:[.,]\d+)?', text)
+            if not candidates:
+                return 0.0
+
+            values = []
+            for token in candidates:
+                amount_guess = _coerce_amount(token)
+                if amount_guess > 0:
+                    values.append(amount_guess)
+
+            if not values:
+                return 0.0
+
+            # Heuristic: highest positive number in the label is most likely line price.
+            return max(values)
+
+        collected = []
+        seen = set()
+        for item in raw_items:
+            if isinstance(item, str):
+                name = item.strip()
+                amount = _infer_amount_from_name(name)
+            elif isinstance(item, dict):
+                name = str(
+                    item.get("name")
+                    or item.get("item")
+                    or item.get("description")
+                    or item.get("product")
+                    or ""
+                ).strip()
+                amount = _coerce_amount(
+                    item.get("amount")
+                    or item.get("price")
+                    or item.get("line_total")
+                    or item.get("item_total")
+                    or item.get("linePrice")
+                    or item.get("unit_price")
+                    or item.get("unitPrice")
+                    or item.get("total")
+                    or item.get("subtotal")
+                    or 0
+                )
+                if amount <= 0:
+                    amount = _infer_amount_from_name(name)
+            else:
+                name = ""
+                amount = 0.0
+
+            if not name:
+                continue
+            normalized = name.lower()
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            collected.append({"name": name, "amount": amount})
+
+        return collected
+
+    def _format_top_items_description(items):
+        if not items:
+            return ""
+
+        sortable = list(items)
+        sortable.sort(key=lambda entry: float(entry.get("amount") or 0), reverse=True)
+        top_names = [_clean_item_label(entry.get("name", "")) for entry in sortable if entry.get("name")]
+        top_names = [name for name in top_names if name]
+
+        if not top_names:
+            return ""
+        if len(top_names) == 1:
+            return _shorten_text(top_names[0], max_len=42)
+        if len(top_names) == 2:
+            return _shorten_text(f"{top_names[0]} and {top_names[1]}", max_len=42)
+        return _shorten_text(f"{top_names[0]} and {top_names[1]} and others", max_len=42)
+
+    parsed_items = _collect_items(
+        parsed.get("items") or parsed.get("line_items") or parsed.get("products")
+    )
+
+    if parsed_items:
+        description_val = _format_top_items_description(parsed_items)
+
+    if description_val:
+        description_val = _shorten_text(description_val, max_len=42)
+
+    category_name_val = category_name_raw
+
+    # Drop generic guesses like Minuman unless the model text itself supports them.
+    if category_name_val and _is_generic_category(category_name_val):
+        if not _category_supported_by_text(category_name_val, raw_response_text):
+            category_name_val = ""
+
+    category_exists = bool(category_name_val and not _is_generic_category(category_name_val))
+
+    if category_name_val and _is_generic_category(category_name_val):
+        category_name_val = ""
+        category_exists = False
+
+    likely_category_match = _guess_likely_category_match(
+        store_name_val,
+        category_name_raw,
+        raw_response_text,
+        tx_type,
+    )
+    if not likely_category_match and category_name_raw and not _is_generic_category(category_name_raw):
+        likely_category_match = category_name_raw
+    if not likely_category_match and store_name_val:
+        likely_category_match = store_name_val
+
+    # Check if the likely category already exists in the database
+    likely_category_exists = False
+    if likely_category_match:
+        likely_norm = _normalize_text(likely_category_match)
+        if tx_type == "income":
+            rows = db.execute("SELECT name FROM income_categories").fetchall()
+        else:
+            rows = db.execute("SELECT name FROM categories").fetchall()
+        likely_category_exists = any(_normalize_text(row["name"]) == likely_norm for row in rows)
+
+    if category_name_val:
+        category_prompt = ""
+    elif category_name_raw:
+        if _is_generic_category(category_name_raw):
+            category_prompt = "Category was too generic. Please choose a more specific category manually."
+        else:
+            category_prompt = f'Category "{category_name_raw}" is not in your list yet. Add it in Categories.'
+    else:
+        category_prompt = "Could not infer a category. Please choose one manually."
+
+    return jsonify({
+        "ok": True,
+        "amount": amount_val,
+        "store_name": store_name_val,
+        "description": description_val,
+        "date": date_val,
+        "category_name": category_name_val,
+        "category_name_raw": category_name_raw,
+        "likely_category_match": likely_category_match,
+        "category_exists": category_exists,
+        "suggest_add_category": bool(likely_category_match and not likely_category_exists),
+        "category_prompt": category_prompt,
+    })
 
 
 @app.route("/api/daily-expenses")

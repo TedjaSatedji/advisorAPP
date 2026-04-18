@@ -1,4 +1,4 @@
-# Gunicorn configuration for advisorAPP
+# Gunicorn configuration for XPense
 # Usage: gunicorn -c gunicorn.conf.py app:app
 
 bind = "0.0.0.0:5000"

@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Income · advisorAPP{% endblock %}
+{% block title %}Income · XPense{% endblock %}
 
 {% block content %}
 <!-- ── Summary Stats ── -->
@@ -58,10 +58,11 @@
             <table class="data-table mb-2 desktop-only">
                 <thead>
                     <tr>
-                        <th style="width:30%">Description</th>
-                        <th style="width:20%">Source</th>
-                        <th style="width:25%; text-align:right">Amount</th>
-                        <th style="width:25%; text-align:right">Action</th>
+                        <th style="width:28%">Description</th>
+                        <th style="width:18%">Source</th>
+                        <th style="width:12%">Image</th>
+                        <th style="width:22%; text-align:right">Amount</th>
+                        <th style="width:20%; text-align:right">Action</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -69,8 +70,16 @@
                     <tr>
                         <td>{{ e.description or '—' }}</td>
                         <td><span class="cat-pill" style="border-color: rgba(34,197,94,0.3); color: var(--success);">{{ e.category }}</span></td>
+                        <td>
+                            {% if e.receipt_image %}
+                            <a href="{{ url_for('static', filename=e.receipt_image) }}" target="_blank" rel="noopener">View</a>
+                            {% else %}
+                            —
+                            {% endif %}
+                        </td>
                         <td class="amount" style="text-align:right; color: var(--success);">+ Rp {{ "{:,.0f}".format(e.amount) }}</td>
                         <td style="text-align:right">
+                            <button type="button" class="btn btn-ghost btn-sm" onclick="openEditIncome({{ e.id }}, {{ e.amount }}, '{{ e.description or '' }}', '{{ e.date }}', {{ e.category_id }})" style="margin-right:0.25rem;">✎</button>
                             <form id="del-inc-d-{{ e.id }}" method="POST" action="{{ url_for('delete_income', income_id=e.id) }}" style="display:inline">
                                 <button type="button" class="btn btn-ghost btn-sm text-danger" onclick="confirmDelete('del-inc-d-{{ e.id }}', '{{ e.description or 'this entry' }}')">✕</button>
                             </form>
@@ -88,10 +97,15 @@
                         <div class="mobile-item-name">{{ e.description or '—' }}</div>
                         <div class="mobile-item-meta">
                             <span class="cat-pill" style="border-color: rgba(34,197,94,0.3); color: var(--success);">{{ e.category }}</span>
+                            {% if e.receipt_image %}
+                            <span>·</span>
+                            <a href="{{ url_for('static', filename=e.receipt_image) }}" target="_blank" rel="noopener">image</a>
+                            {% endif %}
                         </div>
                     </div>
                     <div style="display:flex; align-items:center; gap:0.5rem;">
                         <span class="mobile-item-amount" style="color: var(--success);">+ Rp {{ "{:,.0f}".format(e.amount) }}</span>
+                        <button type="button" class="btn btn-ghost btn-sm" onclick="openEditIncome({{ e.id }}, {{ e.amount }}, '{{ e.description or '' }}', '{{ e.date }}', {{ e.category_id }})" style="min-width:36px; min-height:36px; font-size:0.9rem;">✎</button>
                         <form id="del-inc-m-{{ e.id }}" method="POST" action="{{ url_for('delete_income', income_id=e.id) }}" style="display:inline">
                             <button type="button" class="btn btn-ghost btn-sm text-danger" style="min-width:36px; min-height:36px; font-size:0.9rem;" onclick="confirmDelete('del-inc-m-{{ e.id }}', '{{ e.description or 'this entry' }}')">✕</button>
                         </form>
@@ -116,7 +130,7 @@
                 <h2 class="section-title">Add Income</h2>
                 <span class="text-success" style="font-size:0.72rem;">▸ New</span>
             </div>
-            <form method="POST" action="{{ url_for('add_income') }}" id="add-income-form">
+            <form method="POST" action="{{ url_for('add_income') }}" id="add-income-form" enctype="multipart/form-data">
                 <div class="form-group">
                     <label class="form-label" for="amount">Amount (Rp)</label>
                     <input type="number" step="0.01" min="0" name="amount" id="amount" class="form-input" placeholder="0" required>
@@ -133,15 +147,25 @@
                     <div class="form-group">
                         <label class="form-label" for="category_id">Source</label>
                         <select name="category_id" id="category_id" class="form-select" required>
+                            <option value="" selected>Select a source</option>
                             {% for cat in income_categories %}
                             <option value="{{ cat.id }}">{{ cat.name }}</option>
                             {% endfor %}
+                            <option value="__add_new__">+ Add new source...</option>
                         </select>
                     </div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="receipt_image">Proof Image (optional)</label>
+                    <input type="file" name="receipt_image" id="receipt_image" class="form-input" accept="image/png,image/jpeg,image/jpg,image/webp">
                 </div>
                 <button type="submit" class="btn btn-primary" style="width:100%; margin-top:0.5rem; background: var(--success); border-color: var(--success);">
                     Add Income
                 </button>
+                <button type="button" id="scan-income-photo-btn" class="btn btn-secondary" style="width:100%; margin-top:0.5rem;">
+                    Scan Income Photo
+                </button>
+                <p id="scan-income-status" class="text-muted" style="font-size:0.72rem; margin-top:0.5rem;"></p>
             </form>
         </div>
 
@@ -177,4 +201,292 @@
         </div>
     </div>
 </div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+    (function() {
+        const scanBtn = document.getElementById('scan-income-photo-btn');
+        const fileInput = document.getElementById('receipt_image');
+        const statusEl = document.getElementById('scan-income-status');
+
+        if (!scanBtn || !fileInput) return;
+
+        scanBtn.addEventListener('click', () => fileInput.click());
+
+        fileInput.addEventListener('change', async () => {
+            const file = fileInput.files && fileInput.files[0];
+            if (!file) return;
+
+            const form = new FormData();
+            form.append('photo', file);
+            form.append('target', 'income');
+
+            scanBtn.disabled = true;
+            statusEl.textContent = 'Analyzing image...';
+
+            try {
+                const res = await fetch('/api/recognize-transaction-photo', {
+                    method: 'POST',
+                    body: form,
+                });
+                const data = await res.json();
+
+                if (!res.ok || !data.ok) {
+                    throw new Error(data.error || 'Scan failed.');
+                }
+
+                if (typeof data.amount === 'number' && data.amount > 0) {
+                    document.getElementById('amount').value = data.amount.toFixed(2);
+                }
+                if (data.store_name) {
+                    document.getElementById('description').value = data.store_name;
+                }
+                if (data.date) {
+                    document.getElementById('date').value = data.date;
+                }
+
+                let matchedCategory = false;
+                const normalizeCategory = (value) => String(value || '')
+                    .toLowerCase()
+                    .replace(/[^a-z0-9\s]/g, ' ')
+                    .replace(/\s+/g, ' ')
+                    .trim();
+                const genericCategories = new Set(['other', 'others', 'misc', 'miscellaneous']);
+                const likelyCategory = String(data.likely_category_match || data.category_name_raw || data.category_name || '').trim();
+                const capitalizedLikelyCategory = likelyCategory.charAt(0).toUpperCase() + likelyCategory.slice(1);
+                const shouldSuggestAddCategory = Boolean(data.suggest_add_category);
+
+                const categorySelect = document.getElementById('category_id');
+                const inferredCandidates = [data.category_name, likelyCategory, data.category_name_raw]
+                    .map((value) => normalizeCategory(value))
+                    .filter(Boolean);
+
+                for (const candidate of inferredCandidates) {
+                    const option = Array.from(categorySelect.options).find(
+                        (opt) => normalizeCategory(opt.textContent || '') === candidate
+                    );
+                    if (option) {
+                        categorySelect.value = option.value;
+                        matchedCategory = true;
+                        break;
+                    }
+                }
+
+                if (!matchedCategory && shouldSuggestAddCategory) {
+                    const popupMessage = likelyCategory
+                        ? 'I didnt see any category fitting for this, add a new one?\n\nMost likely category: ' + capitalizedLikelyCategory
+                        : 'I didnt see any category fitting for this, add a new one?';
+                    if (window.confirm(popupMessage)) {
+                        if (!likelyCategory) {
+                            statusEl.textContent = 'Could not infer a source to add.';
+                            return;
+                        }
+
+                        const categoryName = likelyCategory.charAt(0).toUpperCase() + likelyCategory.slice(1);
+                        const createRes = await fetch('/income-categories/add', {
+                            method: 'POST',
+                            headers: {
+                                'X-Requested-With': 'fetch',
+                            },
+                            body: new URLSearchParams({ name: categoryName }),
+                        });
+                        const createData = await createRes.json();
+                        if (!createRes.ok || !createData.ok) {
+                            throw new Error(createData.error || 'Failed to add source.');
+                        }
+
+                        const categorySelect = document.getElementById('category_id');
+                        let option = Array.from(categorySelect.options).find((opt) => String(opt.value) === String(createData.id));
+                        if (!option) {
+                            option = document.createElement('option');
+                            option.value = createData.id;
+                            option.textContent = createData.name;
+                            categorySelect.appendChild(option);
+                        }
+                        categorySelect.value = String(createData.id);
+                        statusEl.textContent = createData.existing ? 'Added to your income sources list.' : 'Source added and selected.';
+                        return;
+                    }
+
+                    if (data.category_prompt) {
+                        statusEl.innerHTML = data.category_prompt + (likelyCategory ? ' Most likely: <strong>' + likelyCategory + '</strong>.' : '');
+                    } else if (likelyCategory && !genericCategories.has(normalizeCategory(likelyCategory))) {
+                        statusEl.innerHTML = 'I didnt see any category fitting for this, add a new one? Most likely: <strong>' + likelyCategory + '</strong>.';
+                    } else if (likelyCategory) {
+                        statusEl.innerHTML = 'I didnt see any category fitting for this, add a new one?';
+                    } else {
+                        statusEl.textContent = 'Could not infer a category. Please choose one manually.';
+                    }
+                } else if (!matchedCategory) {
+                    if (likelyCategory) {
+                        statusEl.innerHTML = 'Most likely source <strong>' + likelyCategory + '</strong> is already in your list. Please select it manually.';
+                    } else {
+                        statusEl.textContent = 'Could not infer a category. Please choose one manually.';
+                    }
+                } else {
+                    statusEl.textContent = 'Scanned successfully.';
+                }
+            } catch (err) {
+                statusEl.textContent = err.message || 'Failed to scan image.';
+            } finally {
+                scanBtn.disabled = false;
+            }
+        });
+    })();
+</script>
+
+<!-- Edit Income Modal -->
+<div id="editIncomeModal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.5); z-index:1000; align-items:center; justify-content:center;">
+    <div class="card" style="max-width:450px; width:90%; max-height:90vh; overflow-y:auto;">
+        <div class="section-header" style="margin-bottom:1.25rem;">
+            <h2 class="section-title">Edit Income</h2>
+        </div>
+        <form id="editIncomeForm" method="POST" style="display:none;">
+            <div class="form-group">
+                <label class="form-label" for="editAmount">Amount (Rp)</label>
+                <input type="number" step="0.01" min="0" name="amount" id="editAmount" class="form-input" required>
+            </div>
+            <div class="form-group">
+                <label class="form-label" for="editDescription">Description</label>
+                <input type="text" name="description" id="editDescription" class="form-input">
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label class="form-label" for="editDate">Date</label>
+                    <input type="date" name="date" id="editDate" class="form-input" required>
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="editCategory">Source</label>
+                    <select name="category_id" id="editCategory" class="form-select" required>
+                        {% for cat in income_categories %}
+                        <option value="{{ cat.id }}">{{ cat.name }}</option>
+                        {% endfor %}
+                        <option value="__add_new__">+ Add new source...</option>
+                    </select>
+                </div>
+            </div>
+            <div style="display:flex; gap:0.5rem; margin-top:1.5rem;">
+                <button type="submit" class="btn btn-primary" style="flex:1; background:var(--success); border-color:var(--success);">Save Changes</button>
+                <button type="button" class="btn btn-secondary" style="flex:1;" onclick="closeEditIncome()">Cancel</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script>
+(function initInlineIncomeSourceCreation() {
+    const addSelect = document.getElementById('category_id');
+    const editSelect = document.getElementById('editCategory');
+    const statusEl = document.getElementById('scan-income-status');
+    const addSourceSentinel = '__add_new__';
+    const selects = [addSelect, editSelect].filter(Boolean);
+    const lastSelectedBySelect = new WeakMap();
+
+    if (!selects.length) return;
+
+    const rememberSelection = (select) => {
+        const value = String(select.value || '');
+        if (value && value !== addSourceSentinel) {
+            lastSelectedBySelect.set(select, value);
+        }
+    };
+
+    const upsertSourceOptionToSelect = (select, id, name) => {
+        let option = Array.from(select.options).find((opt) => String(opt.value) === String(id));
+        if (!option) {
+            option = document.createElement('option');
+            option.value = String(id);
+            option.textContent = name;
+            const sentinelOption = Array.from(select.options).find((opt) => opt.value === addSourceSentinel);
+            if (sentinelOption) {
+                select.insertBefore(option, sentinelOption);
+            } else {
+                select.appendChild(option);
+            }
+        }
+    };
+
+    const createSourceInline = async (select) => {
+        const previousValue = String(lastSelectedBySelect.get(select) || '');
+        const typedName = window.prompt('New income source name:');
+        const sourceName = String(typedName || '').trim();
+
+        if (!sourceName) {
+            select.value = previousValue;
+            return;
+        }
+
+        const createRes = await fetch('/income-categories/add', {
+            method: 'POST',
+            headers: {
+                'X-Requested-With': 'fetch',
+            },
+            body: new URLSearchParams({ name: sourceName }),
+        });
+        const createData = await createRes.json();
+        if (!createRes.ok || !createData.ok) {
+            throw new Error(createData.error || 'Failed to add source.');
+        }
+
+        selects.forEach((targetSelect) => {
+            upsertSourceOptionToSelect(targetSelect, createData.id, createData.name);
+        });
+
+        const selectedValue = String(createData.id);
+        select.value = selectedValue;
+        lastSelectedBySelect.set(select, selectedValue);
+
+        if (statusEl) {
+            statusEl.textContent = createData.existing
+                ? 'Source already existed and was selected.'
+                : 'Source added and selected.';
+        }
+    };
+
+    selects.forEach((select) => {
+        rememberSelection(select);
+        select.addEventListener('focus', () => rememberSelection(select));
+        select.addEventListener('change', async () => {
+            if (select.value !== addSourceSentinel) {
+                rememberSelection(select);
+                return;
+            }
+
+            try {
+                await createSourceInline(select);
+            } catch (err) {
+                const previousValue = String(lastSelectedBySelect.get(select) || '');
+                select.value = previousValue;
+                if (statusEl) {
+                    statusEl.textContent = err.message || 'Failed to add source.';
+                }
+            }
+        });
+    });
+})();
+
+function openEditIncome(id, amount, description, date, categoryId) {
+    document.getElementById('editIncomeForm').action = '/income/edit/' + id;
+    document.getElementById('editAmount').value = amount || '';
+    document.getElementById('editDescription').value = description || '';
+    document.getElementById('editDate').value = date || '';
+    document.getElementById('editCategory').value = categoryId || '';
+    document.getElementById('editIncomeForm').style.display = 'block';
+    document.getElementById('editIncomeModal').style.display = 'flex';
+}
+
+function closeEditIncome() {
+    document.getElementById('editIncomeModal').style.display = 'none';
+    document.getElementById('editIncomeForm').style.display = 'none';
+}
+
+window.addEventListener('click', (e) => {
+    const modal = document.getElementById('editIncomeModal');
+    if (e.target === modal) {
+        closeEditIncome();
+    }
+});
+</script>
 {% endblock %}
