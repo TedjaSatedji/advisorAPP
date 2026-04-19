@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Login · XPense{% endblock %}
+
+{% block content %}
+<div style="max-width:460px; margin:3rem auto;">
+    <div class="card" style="margin-bottom:0;">
+        <div class="section-header" style="margin-bottom:1.25rem;">
+            <h1 class="section-title">Account Login</h1>
+            <span class="text-accent" style="font-size:0.72rem;">Secure</span>
+        </div>
+
+        <form method="POST" action="{{ url_for('login') }}">
+            <input type="hidden" name="next" value="{{ next_url or '' }}">
+            <div class="form-group">
+                <label class="form-label" for="email">Email</label>
+                <input class="form-input" type="email" name="email" id="email" autocomplete="email" required>
+            </div>
+            <div class="form-group">
+                <label class="form-label" for="password">Password</label>
+                <input class="form-input" type="password" name="password" id="password" autocomplete="current-password" required>
+            </div>
+            <div style="display:flex; justify-content:flex-end; margin-bottom:1rem;">
+                <a href="{{ url_for('forgot_password') }}" class="text-accent" style="font-size:0.78rem;">Forgot password?</a>
+            </div>
+            <button type="submit" class="btn btn-primary" style="width:100%;">Log In</button>
+        </form>
+
+        <p class="text-muted" style="font-size:0.78rem; margin-top:1rem;">
+            Need an account? <a href="{{ url_for('register') }}" class="text-accent">Create one</a>
+        </p>
+    </div>
+</div>
+{% endblock %}

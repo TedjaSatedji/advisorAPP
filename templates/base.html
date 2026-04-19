@@ -859,9 +859,10 @@
     <!-- ── Navbar ── -->
     <nav class="nav-bar" id="main-nav">
         <div class="nav-inner">
-            <a href="{{ url_for('dashboard') }}" class="nav-brand">
+            <a href="{{ url_for('dashboard') if current_user else url_for('login') }}" class="nav-brand">
                 <span class="amber">▸</span> XPense
             </a>
+            {% if current_user %}
             <ul class="nav-links" id="nav-links">
                 <li><a href="{{ url_for('dashboard') }}" class="{% if request.endpoint == 'dashboard' %}active{% endif %}">Dashboard</a></li>
                 <li><a href="{{ url_for('expenses_page') }}" class="{% if request.endpoint == 'expenses_page' %}active{% endif %}">Expenses</a></li>
@@ -870,7 +871,18 @@
                 <li><a href="{{ url_for('reports') }}" class="{% if request.endpoint == 'reports' %}active{% endif %}">Reports</a></li>
                 <li><a href="{{ url_for('categories') }}" class="{% if request.endpoint == 'categories' %}active{% endif %}">Categories</a></li>
                 <li><a href="{{ url_for('wishlist') }}" class="{% if request.endpoint == 'wishlist' %}active{% endif %}">Wishlist</a></li>
+                <li>
+                    <form method="POST" action="{{ url_for('logout') }}" style="display:inline;" onsubmit="return confirm('Log out from this session?');">
+                        <button type="submit" class="btn btn-ghost btn-sm" style="min-height:auto;">Logout</button>
+                    </form>
+                </li>
             </ul>
+            {% else %}
+            <ul class="nav-links" id="nav-links">
+                <li><a href="{{ url_for('login') }}" class="{% if request.endpoint == 'login' %}active{% endif %}">Login</a></li>
+                <li><a href="{{ url_for('register') }}" class="{% if request.endpoint == 'register' %}active{% endif %}">Register</a></li>
+            </ul>
+            {% endif %}
             <div class="hamburger" id="hamburger" onclick="document.getElementById('nav-links').classList.toggle('open')">
                 <span></span><span></span><span></span>
             </div>
@@ -899,6 +911,7 @@
     </footer>
 
     <!-- ── Mobile Bottom Navigation ── -->
+    {% if current_user %}
     <nav class="bottom-nav" id="bottom-nav">
         <div class="bottom-nav-inner">
             <a href="{{ url_for('dashboard') }}" class="{% if request.endpoint == 'dashboard' %}active{% endif %}">
@@ -931,6 +944,7 @@
             </a>
         </div>
     </nav>
+    {% endif %}
 
     {% block scripts %}{% endblock %}
 

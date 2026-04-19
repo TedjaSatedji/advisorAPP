@@ -8,12 +8,45 @@ import os
 import json
 import uuid
 import re
-from datetime import datetime, date
+import secrets
+import hashlib
+import smtplib
+import ssl
+from email.message import EmailMessage
+from datetime import datetime, date, timedelta
+from functools import wraps
 from flask import (
     Flask, render_template, request, redirect, url_for,
-    flash, jsonify, g
+    flash, jsonify, g, session
 )
 from werkzeug.utils import secure_filename
+from werkzeug.security import generate_password_hash, check_password_hash
+
+try:
+    from dotenv import load_dotenv  # type: ignore
+except Exception:
+    load_dotenv = None
+
+
+def _load_env_fallback(env_path):
+    """Lightweight .env parser for bootstrapping when python-dotenv is unavailable."""
+    if not os.path.exists(env_path):
+        return
+
+    try:
+        with open(env_path, "r", encoding="utf-8") as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+    except Exception:
+        # Keep startup resilient; the required SECRET_KEY check runs below.
+        return
 
 try:
     from google import genai  # type: ignore
@@ -28,16 +61,99 @@ except Exception:
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATABASE = os.path.join(BASE_DIR, "xpense.db")
 
-app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "xpense-app-secret-key-change-me")
+if load_dotenv is not None:
+    load_dotenv(os.path.join(BASE_DIR, ".env"))
+else:
+    _load_env_fallback(os.path.join(BASE_DIR, ".env"))
 
-API_KEY = "AIzaSyBfTVE1lQF_qZ47dMf42IKrqT2k6j4lRfE"
+app = Flask(__name__)
+app.secret_key = os.environ.get("SECRET_KEY", "").strip()
+if not app.secret_key:
+    raise RuntimeError("Missing required SECRET_KEY environment variable.")
+
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"] = os.environ.get("SESSION_COOKIE_SECURE", "0") == "1"
 MODEL = "gemma-3-27b-it"
 
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", MODEL)
 ENTRY_UPLOAD_REL_DIR = os.path.join("uploads", "entries")
 ENTRY_UPLOAD_DIR = os.path.join(BASE_DIR, "static", "uploads", "entries")
 ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+
+APP_BASE_URL = os.environ.get("APP_BASE_URL", "http://localhost:5000").strip().rstrip("/")
+
+MAIL_SMTP_HOST = os.environ.get("MAIL_SMTP_HOST", "smtp.gmail.com").strip()
+MAIL_SMTP_PORT = int(os.environ.get("MAIL_SMTP_PORT", "587") or "587")
+MAIL_SMTP_USER = os.environ.get("MAIL_SMTP_USER", "").strip()
+MAIL_SMTP_PASSWORD = os.environ.get("MAIL_SMTP_PASSWORD", "").strip()
+MAIL_SMTP_USE_TLS = os.environ.get("MAIL_SMTP_USE_TLS", "1") == "1"
+MAIL_SMTP_TIMEOUT_SECONDS = int(os.environ.get("MAIL_SMTP_TIMEOUT_SECONDS", "15") or "15")
+MAIL_FROM_EMAIL = os.environ.get("MAIL_FROM_EMAIL", MAIL_SMTP_USER).strip()
+MAIL_FROM_NAME = os.environ.get("MAIL_FROM_NAME", "XPense Support").strip()
+MAIL_DEBUG_SHOW_RESET_LINK = os.environ.get("MAIL_DEBUG_SHOW_RESET_LINK", "0") == "1"
+MAIL_PASSWORD_RESET_SUBJECT = os.environ.get("MAIL_PASSWORD_RESET_SUBJECT", "XPense Password Reset").strip()
+MAIL_PASSWORD_RESET_EXPIRY_MINUTES = int(os.environ.get("MAIL_PASSWORD_RESET_EXPIRY_MINUTES", "60") or "60")
+
+MAIL_SMTP_ENABLED = bool(
+    MAIL_SMTP_HOST and MAIL_SMTP_PORT and MAIL_SMTP_USER and MAIL_SMTP_PASSWORD and MAIL_FROM_EMAIL
+)
+
+
+def current_user_id():
+    user_id = session.get("user_id")
+    if isinstance(user_id, int):
+        return user_id
+    return None
+
+
+def login_required(view_func):
+    @wraps(view_func)
+    def wrapped(*args, **kwargs):
+        if not current_user_id():
+            flash("Please log in first.", "error")
+            return redirect(url_for("login", next=request.path))
+        return view_func(*args, **kwargs)
+
+    return wrapped
+
+
+def _safe_next_path(candidate):
+    value = str(candidate or "").strip()
+    if value.startswith("/") and not value.startswith("//"):
+        return value
+    return ""
+
+
+@app.before_request
+def load_user_and_require_auth():
+    endpoint = (request.endpoint or "").strip()
+    public_endpoints = {
+        "login",
+        "register",
+        "forgot_password",
+        "reset_password",
+        "static",
+    }
+
+    user_id = current_user_id()
+    g.current_user = None
+    if user_id:
+        db = get_db()
+        g.current_user = db.execute(
+            "SELECT id, email, created_at FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+        if g.current_user is None:
+            session.clear()
+
+    if endpoint.startswith("static") or endpoint in public_endpoints:
+        return None
+
+    if g.current_user is None:
+        return redirect(url_for("login", next=request.path))
+
+    return None
 
 
 def _extract_json_object(text):
@@ -393,6 +509,13 @@ def init_db():
     db.execute("PRAGMA foreign_keys=ON")
 
     db.executescript("""
+        CREATE TABLE IF NOT EXISTS users (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            email           TEXT    NOT NULL UNIQUE,
+            password_hash   TEXT    NOT NULL,
+            created_at      TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+        );
+
         CREATE TABLE IF NOT EXISTS categories (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             name        TEXT    NOT NULL UNIQUE,
@@ -401,24 +524,28 @@ def init_db():
 
         CREATE TABLE IF NOT EXISTS expenses (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id     INTEGER NOT NULL,
             amount      REAL    NOT NULL,
             description TEXT    NOT NULL DEFAULT '',
             date        TEXT    NOT NULL,
             category_id INTEGER NOT NULL,
             receipt_image TEXT  DEFAULT NULL,
             created_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
-            FOREIGN KEY (category_id) REFERENCES categories(id)
+            FOREIGN KEY (category_id) REFERENCES categories(id),
+            FOREIGN KEY (user_id) REFERENCES users(id)
         );
 
         CREATE TABLE IF NOT EXISTS wishlist (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id     INTEGER NOT NULL,
             name        TEXT    NOT NULL,
             price       REAL    NOT NULL DEFAULT 0,
             priority    TEXT    NOT NULL DEFAULT 'medium',
             notes       TEXT    DEFAULT '',
             purchased   INTEGER NOT NULL DEFAULT 0,
             created_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
-            purchased_at TEXT   DEFAULT NULL
+            purchased_at TEXT   DEFAULT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id)
         );
 
         CREATE TABLE IF NOT EXISTS income_categories (
@@ -429,13 +556,25 @@ def init_db():
 
         CREATE TABLE IF NOT EXISTS income (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id         INTEGER NOT NULL,
             amount          REAL    NOT NULL,
             description     TEXT    NOT NULL DEFAULT '',
             date            TEXT    NOT NULL,
             category_id     INTEGER NOT NULL,
             receipt_image   TEXT    DEFAULT NULL,
             created_at      TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
-            FOREIGN KEY (category_id) REFERENCES income_categories(id)
+            FOREIGN KEY (category_id) REFERENCES income_categories(id),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS password_reset_tokens (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id         INTEGER NOT NULL,
+            token_hash      TEXT    NOT NULL UNIQUE,
+            expires_at      TEXT    NOT NULL,
+            used_at         TEXT    DEFAULT NULL,
+            created_at      TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
+            FOREIGN KEY (user_id) REFERENCES users(id)
         );
     """)
 
@@ -443,10 +582,18 @@ def init_db():
     expense_cols = [r[1] for r in db.execute("PRAGMA table_info(expenses)").fetchall()]
     if "receipt_image" not in expense_cols:
         db.execute("ALTER TABLE expenses ADD COLUMN receipt_image TEXT DEFAULT NULL")
+    if "user_id" not in expense_cols:
+        db.execute("ALTER TABLE expenses ADD COLUMN user_id INTEGER")
 
     income_cols = [r[1] for r in db.execute("PRAGMA table_info(income)").fetchall()]
     if "receipt_image" not in income_cols:
         db.execute("ALTER TABLE income ADD COLUMN receipt_image TEXT DEFAULT NULL")
+    if "user_id" not in income_cols:
+        db.execute("ALTER TABLE income ADD COLUMN user_id INTEGER")
+
+    wishlist_cols = [r[1] for r in db.execute("PRAGMA table_info(wishlist)").fetchall()]
+    if "user_id" not in wishlist_cols:
+        db.execute("ALTER TABLE wishlist ADD COLUMN user_id INTEGER")
     db.commit()
 
     # Seed default expense categories
@@ -468,13 +615,289 @@ def init_db():
     db.close()
 
 
+def claim_legacy_records(user_id):
+    """Assign old rows created before auth migration to the first registered user."""
+    db = get_db()
+    already_claimed = db.execute(
+        """
+        SELECT
+            (SELECT COUNT(*) FROM expenses WHERE user_id IS NOT NULL) +
+            (SELECT COUNT(*) FROM income WHERE user_id IS NOT NULL) +
+            (SELECT COUNT(*) FROM wishlist WHERE user_id IS NOT NULL) AS claimed_count
+        """
+    ).fetchone()["claimed_count"]
+
+    if int(already_claimed or 0) > 0:
+        return
+
+    db.execute("UPDATE expenses SET user_id = ? WHERE user_id IS NULL", (user_id,))
+    db.execute("UPDATE income SET user_id = ? WHERE user_id IS NULL", (user_id,))
+    db.execute("UPDATE wishlist SET user_id = ? WHERE user_id IS NULL", (user_id,))
+    db.commit()
+
+
+def _utc_now_string():
+    return datetime.utcnow().replace(microsecond=0).isoformat()
+
+
+def _utc_expiry_string(minutes_from_now):
+    return (datetime.utcnow() + timedelta(minutes=minutes_from_now)).replace(microsecond=0).isoformat()
+
+
+def _hash_reset_token(token):
+    return hashlib.sha256(str(token).encode("utf-8")).hexdigest()
+
+
+def _build_absolute_url(path):
+    relative = str(path or "").strip()
+    if not relative.startswith("/"):
+        relative = "/" + relative
+    return APP_BASE_URL + relative
+
+
+def _send_email_smtp(to_email, subject, text_body):
+    if not MAIL_SMTP_ENABLED:
+        return False
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = f"{MAIL_FROM_NAME} <{MAIL_FROM_EMAIL}>" if MAIL_FROM_NAME else MAIL_FROM_EMAIL
+    msg["To"] = to_email
+    msg.set_content(text_body)
+
+    context = ssl.create_default_context()
+
+    try:
+        with smtplib.SMTP(MAIL_SMTP_HOST, MAIL_SMTP_PORT, timeout=MAIL_SMTP_TIMEOUT_SECONDS) as server:
+            if MAIL_SMTP_USE_TLS:
+                server.starttls(context=context)
+            server.login(MAIL_SMTP_USER, MAIL_SMTP_PASSWORD)
+            server.send_message(msg)
+        return True
+    except Exception as exc:
+        app.logger.exception("Failed to send SMTP email: %s", exc)
+        return False
+
+
+def _send_password_reset_email(to_email, reset_url):
+    lines = [
+        "We received a request to reset your XPense password.",
+        "",
+        "Use this link to reset your password:",
+        reset_url,
+        "",
+        f"This link expires in {MAIL_PASSWORD_RESET_EXPIRY_MINUTES} minutes and can be used once.",
+        "",
+        "If you did not request this reset, you can safely ignore this email.",
+    ]
+    return _send_email_smtp(
+        to_email=to_email,
+        subject=MAIL_PASSWORD_RESET_SUBJECT,
+        text_body="\n".join(lines),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Template context helpers
 # ---------------------------------------------------------------------------
 
 @app.context_processor
 def inject_now():
-    return {"now": datetime.now(), "today": date.today().isoformat()}
+    return {
+        "now": datetime.now(),
+        "today": date.today().isoformat(),
+        "current_user": g.get("current_user"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Routes — Auth
+# ---------------------------------------------------------------------------
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if g.get("current_user") is not None:
+        return redirect(url_for("dashboard"))
+
+    if request.method == "POST":
+        email = request.form.get("email", "").strip().lower()
+        password = request.form.get("password", "")
+        next_url = _safe_next_path(request.form.get("next", ""))
+
+        if not email or not password:
+            flash("Email and password are required.", "error")
+            return render_template("login.html", next_url=next_url)
+
+        db = get_db()
+        user = db.execute(
+            "SELECT id, email, password_hash FROM users WHERE email = ?",
+            (email,),
+        ).fetchone()
+
+        if user is None or not check_password_hash(user["password_hash"], password):
+            flash("Invalid email or password.", "error")
+            return render_template("login.html", next_url=next_url)
+
+        session.clear()
+        session["user_id"] = user["id"]
+        claim_legacy_records(user["id"])
+        flash("Logged in successfully.", "success")
+        if next_url:
+            return redirect(next_url)
+        return redirect(url_for("dashboard"))
+
+    return render_template("login.html", next_url=_safe_next_path(request.args.get("next", "")))
+
+
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    if g.get("current_user") is not None:
+        return redirect(url_for("dashboard"))
+
+    if request.method == "POST":
+        email = request.form.get("email", "").strip().lower()
+        password = request.form.get("password", "")
+        password_confirm = request.form.get("password_confirm", "")
+
+        if not email or not password:
+            flash("Email and password are required.", "error")
+            return render_template("register.html")
+
+        if len(password) < 8:
+            flash("Password must be at least 8 characters.", "error")
+            return render_template("register.html")
+
+        if password != password_confirm:
+            flash("Password confirmation does not match.", "error")
+            return render_template("register.html")
+
+        db = get_db()
+        try:
+            cursor = db.execute(
+                "INSERT INTO users (email, password_hash) VALUES (?, ?)",
+                (email, generate_password_hash(password)),
+            )
+            db.commit()
+        except sqlite3.IntegrityError:
+            flash("Email already registered.", "error")
+            return render_template("register.html")
+
+        session.clear()
+        session["user_id"] = cursor.lastrowid
+        claim_legacy_records(cursor.lastrowid)
+        flash("Account created.", "success")
+        return redirect(url_for("dashboard"))
+
+    return render_template("register.html")
+
+
+@app.route("/forgot-password", methods=["GET", "POST"])
+def forgot_password():
+    if g.get("current_user") is not None:
+        return redirect(url_for("dashboard"))
+
+    reset_link = ""
+
+    if request.method == "POST":
+        email = request.form.get("email", "").strip().lower()
+        if not email:
+            flash("Email is required.", "error")
+            return render_template("forgot_password.html", reset_link=reset_link)
+
+        db = get_db()
+        user = db.execute(
+            "SELECT id, email FROM users WHERE email = ?",
+            (email,),
+        ).fetchone()
+
+        if user is not None:
+            raw_token = secrets.token_urlsafe(32)
+            token_hash = _hash_reset_token(raw_token)
+            expires_at = _utc_expiry_string(MAIL_PASSWORD_RESET_EXPIRY_MINUTES)
+            db.execute(
+                "DELETE FROM password_reset_tokens WHERE user_id = ?",
+                (user["id"],),
+            )
+            db.execute(
+                "INSERT INTO password_reset_tokens (user_id, token_hash, expires_at) VALUES (?, ?, ?)",
+                (user["id"], token_hash, expires_at),
+            )
+            db.commit()
+            reset_link = _build_absolute_url(url_for("reset_password", token=raw_token))
+
+            sent = _send_password_reset_email(user["email"], reset_link)
+            if not sent and MAIL_DEBUG_SHOW_RESET_LINK:
+                flash("SMTP is unavailable. Debug reset link is shown below.", "error")
+
+        flash("If your email exists, a password reset email has been sent.", "success")
+        return render_template(
+            "forgot_password.html",
+            reset_link=reset_link if MAIL_DEBUG_SHOW_RESET_LINK else "",
+            mail_enabled=MAIL_SMTP_ENABLED,
+        )
+
+    return render_template(
+        "forgot_password.html",
+        reset_link=reset_link if MAIL_DEBUG_SHOW_RESET_LINK else "",
+        mail_enabled=MAIL_SMTP_ENABLED,
+    )
+
+
+@app.route("/reset-password/<token>", methods=["GET", "POST"])
+def reset_password(token):
+    if g.get("current_user") is not None:
+        return redirect(url_for("dashboard"))
+
+    token_hash = _hash_reset_token(token)
+    db = get_db()
+    row = db.execute(
+        """
+        SELECT prt.id, prt.user_id, prt.expires_at, prt.used_at, u.email
+        FROM password_reset_tokens prt
+        JOIN users u ON prt.user_id = u.id
+        WHERE prt.token_hash = ?
+        """,
+        (token_hash,),
+    ).fetchone()
+
+    now_str = _utc_now_string()
+    if row is None or row["used_at"] is not None or str(row["expires_at"]) < now_str:
+        flash("This password reset link is invalid or expired.", "error")
+        return redirect(url_for("forgot_password"))
+
+    if request.method == "POST":
+        password = request.form.get("password", "")
+        password_confirm = request.form.get("password_confirm", "")
+
+        if len(password) < 8:
+            flash("Password must be at least 8 characters.", "error")
+            return render_template("reset_password.html", token=token)
+
+        if password != password_confirm:
+            flash("Password confirmation does not match.", "error")
+            return render_template("reset_password.html", token=token)
+
+        db.execute(
+            "UPDATE users SET password_hash = ? WHERE id = ?",
+            (generate_password_hash(password), row["user_id"]),
+        )
+        db.execute(
+            "UPDATE password_reset_tokens SET used_at = ? WHERE id = ?",
+            (_utc_now_string(), row["id"]),
+        )
+        db.commit()
+        flash("Password updated. Please log in.", "success")
+        return redirect(url_for("login"))
+
+    return render_template("reset_password.html", token=token)
+
+
+@app.route("/logout", methods=["POST"])
+@login_required
+def logout():
+    session.clear()
+    flash("Logged out.", "success")
+    return redirect(url_for("login"))
 
 
 # ---------------------------------------------------------------------------
@@ -484,47 +907,50 @@ def inject_now():
 @app.route("/")
 def dashboard():
     db = get_db()
+    user_id = current_user_id()
     today_str = date.today().isoformat()
     month_start = date.today().replace(day=1).isoformat()
 
     # --- Expense totals ---
     row = db.execute(
-        "SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE date = ?",
-        (today_str,)
+        "SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE date = ? AND user_id = ?",
+        (today_str, user_id)
     ).fetchone()
     today_expense = row["total"]
 
     row = db.execute(
-        "SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE date >= ?",
-        (month_start,)
+        "SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE date >= ? AND user_id = ?",
+        (month_start, user_id)
     ).fetchone()
     month_expense = row["total"]
 
     row = db.execute(
-        "SELECT COALESCE(SUM(amount), 0) AS total FROM expenses"
+        "SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE user_id = ?",
+        (user_id,)
     ).fetchone()
     all_time_expense = row["total"]
 
     # --- Income totals ---
     row = db.execute(
-        "SELECT COALESCE(SUM(amount), 0) AS total FROM income WHERE date = ?",
-        (today_str,)
+        "SELECT COALESCE(SUM(amount), 0) AS total FROM income WHERE date = ? AND user_id = ?",
+        (today_str, user_id)
     ).fetchone()
     today_income = row["total"]
 
     row = db.execute(
-        "SELECT COALESCE(SUM(amount), 0) AS total FROM income WHERE date >= ?",
-        (month_start,)
+        "SELECT COALESCE(SUM(amount), 0) AS total FROM income WHERE date >= ? AND user_id = ?",
+        (month_start, user_id)
     ).fetchone()
     month_income = row["total"]
 
     row = db.execute(
-        "SELECT COALESCE(SUM(amount), 0) AS total FROM income"
+        "SELECT COALESCE(SUM(amount), 0) AS total FROM income WHERE user_id = ?",
+        (user_id,)
     ).fetchone()
     all_time_income = row["total"]
 
     # Total entries
-    row = db.execute("SELECT COUNT(*) AS cnt FROM expenses").fetchone()
+    row = db.execute("SELECT COUNT(*) AS cnt FROM expenses WHERE user_id = ?", (user_id,)).fetchone()
     total_entries = row["cnt"]
 
     return render_template(
@@ -543,34 +969,37 @@ def dashboard():
 @app.route("/expenses")
 def expenses_page():
     db = get_db()
+    user_id = current_user_id()
     today_str = date.today().isoformat()
     month_start = date.today().replace(day=1).isoformat()
 
     row = db.execute(
-        "SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE date = ?",
-        (today_str,)
+        "SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE date = ? AND user_id = ?",
+        (today_str, user_id)
     ).fetchone()
     today_total = row["total"]
 
     row = db.execute(
-        "SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE date >= ?",
-        (month_start,)
+        "SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE date >= ? AND user_id = ?",
+        (month_start, user_id)
     ).fetchone()
     month_total = row["total"]
 
     row = db.execute(
-        "SELECT COALESCE(SUM(amount), 0) AS total FROM expenses"
+        "SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE user_id = ?",
+        (user_id,)
     ).fetchone()
     all_time_total = row["total"]
 
     # Recent expenses grouped by date (last 50 entries)
     expenses = db.execute("""
-        SELECT e.id, e.amount, e.description, e.date, e.receipt_image, c.name AS category
+        SELECT e.id, e.amount, e.description, e.date, e.category_id, e.receipt_image, c.name AS category
         FROM expenses e
         JOIN categories c ON e.category_id = c.id
+        WHERE e.user_id = ?
         ORDER BY e.date DESC, e.created_at DESC
         LIMIT 50
-    """).fetchall()
+    """, (user_id,)).fetchall()
 
     grouped = {}
     for exp in expenses:
@@ -587,11 +1016,11 @@ def expenses_page():
         SELECT c.name, COALESCE(SUM(e.amount), 0) AS total
         FROM expenses e
         JOIN categories c ON e.category_id = c.id
-        WHERE e.date >= ?
+        WHERE e.date >= ? AND e.user_id = ?
         GROUP BY c.name
         ORDER BY total DESC
         LIMIT 5
-    """, (month_start,)).fetchall()
+    """, (month_start, user_id)).fetchall()
 
     return render_template(
         "expenses.html",
@@ -611,6 +1040,7 @@ def expenses_page():
 
 @app.route("/expenses/add", methods=["POST"])
 def add_expense():
+    user_id = current_user_id()
     amount = request.form.get("amount", "").strip()
     description = request.form.get("description", "").strip()
     expense_date = request.form.get("date", date.today().isoformat()).strip()
@@ -629,8 +1059,8 @@ def add_expense():
 
     db = get_db()
     db.execute(
-        "INSERT INTO expenses (amount, description, date, category_id, receipt_image) VALUES (?, ?, ?, ?, ?)",
-        (amount, description, expense_date, int(category_id), receipt_image)
+        "INSERT INTO expenses (user_id, amount, description, date, category_id, receipt_image) VALUES (?, ?, ?, ?, ?, ?)",
+        (user_id, amount, description, expense_date, int(category_id), receipt_image)
     )
     db.commit()
     flash("Expense added.", "success")
@@ -640,8 +1070,9 @@ def add_expense():
 @app.route("/expenses/delete/<int:expense_id>", methods=["POST"])
 def delete_expense(expense_id):
     db = get_db()
+    user_id = current_user_id()
     redirect_to = request.form.get("redirect_to", "")
-    db.execute("DELETE FROM expenses WHERE id = ?", (expense_id,))
+    db.execute("DELETE FROM expenses WHERE id = ? AND user_id = ?", (expense_id, user_id))
     db.commit()
     flash("Expense deleted.", "success")
     if redirect_to:
@@ -651,6 +1082,7 @@ def delete_expense(expense_id):
 
 @app.route("/expenses/edit/<int:expense_id>", methods=["POST"])
 def edit_expense(expense_id):
+    user_id = current_user_id()
     amount = request.form.get("amount", "").strip()
     description = request.form.get("description", "").strip()
     expense_date = request.form.get("date", "").strip()
@@ -673,8 +1105,8 @@ def edit_expense(expense_id):
 
     db = get_db()
     db.execute(
-        "UPDATE expenses SET amount = ?, description = ?, date = ?, category_id = ? WHERE id = ?",
-        (amount, description, expense_date, int(category_id), expense_id)
+        "UPDATE expenses SET amount = ?, description = ?, date = ?, category_id = ? WHERE id = ? AND user_id = ?",
+        (amount, description, expense_date, int(category_id), expense_id, user_id)
     )
     db.commit()
     flash("Expense updated.", "success")
@@ -690,35 +1122,38 @@ def edit_expense(expense_id):
 @app.route("/income")
 def income_page():
     db = get_db()
+    user_id = current_user_id()
     today_str = date.today().isoformat()
     month_start = date.today().replace(day=1).isoformat()
 
     # Stats
     row = db.execute(
-        "SELECT COALESCE(SUM(amount), 0) AS total FROM income WHERE date = ?",
-        (today_str,)
+        "SELECT COALESCE(SUM(amount), 0) AS total FROM income WHERE date = ? AND user_id = ?",
+        (today_str, user_id)
     ).fetchone()
     today_total = row["total"]
 
     row = db.execute(
-        "SELECT COALESCE(SUM(amount), 0) AS total FROM income WHERE date >= ?",
-        (month_start,)
+        "SELECT COALESCE(SUM(amount), 0) AS total FROM income WHERE date >= ? AND user_id = ?",
+        (month_start, user_id)
     ).fetchone()
     month_total = row["total"]
 
     row = db.execute(
-        "SELECT COALESCE(SUM(amount), 0) AS total FROM income"
+        "SELECT COALESCE(SUM(amount), 0) AS total FROM income WHERE user_id = ?",
+        (user_id,)
     ).fetchone()
     all_time_total = row["total"]
 
     # Recent income entries
     entries = db.execute("""
-        SELECT i.id, i.amount, i.description, i.date, i.receipt_image, ic.name AS category
+        SELECT i.id, i.amount, i.description, i.date, i.category_id, i.receipt_image, ic.name AS category
         FROM income i
         JOIN income_categories ic ON i.category_id = ic.id
+        WHERE i.user_id = ?
         ORDER BY i.date DESC, i.created_at DESC
         LIMIT 50
-    """).fetchall()
+    """, (user_id,)).fetchall()
 
     # Group by date
     grouped = {}
@@ -738,11 +1173,11 @@ def income_page():
         SELECT ic.name, COALESCE(SUM(i.amount), 0) AS total
         FROM income i
         JOIN income_categories ic ON i.category_id = ic.id
-        WHERE i.date >= ?
+        WHERE i.date >= ? AND i.user_id = ?
         GROUP BY ic.name
         ORDER BY total DESC
         LIMIT 5
-    """, (month_start,)).fetchall()
+    """, (month_start, user_id)).fetchall()
 
     return render_template(
         "income.html",
@@ -758,6 +1193,7 @@ def income_page():
 
 @app.route("/income/add", methods=["POST"])
 def add_income():
+    user_id = current_user_id()
     amount = request.form.get("amount", "").strip()
     description = request.form.get("description", "").strip()
     income_date = request.form.get("date", date.today().isoformat()).strip()
@@ -776,8 +1212,8 @@ def add_income():
 
     db = get_db()
     db.execute(
-        "INSERT INTO income (amount, description, date, category_id, receipt_image) VALUES (?, ?, ?, ?, ?)",
-        (amount, description, income_date, int(category_id), receipt_image)
+        "INSERT INTO income (user_id, amount, description, date, category_id, receipt_image) VALUES (?, ?, ?, ?, ?, ?)",
+        (user_id, amount, description, income_date, int(category_id), receipt_image)
     )
     db.commit()
     flash("Income added.", "success")
@@ -787,8 +1223,9 @@ def add_income():
 @app.route("/income/delete/<int:income_id>", methods=["POST"])
 def delete_income(income_id):
     db = get_db()
+    user_id = current_user_id()
     redirect_to = request.form.get("redirect_to", "")
-    db.execute("DELETE FROM income WHERE id = ?", (income_id,))
+    db.execute("DELETE FROM income WHERE id = ? AND user_id = ?", (income_id, user_id))
     db.commit()
     flash("Income entry deleted.", "success")
     if redirect_to:
@@ -798,6 +1235,7 @@ def delete_income(income_id):
 
 @app.route("/income/edit/<int:income_id>", methods=["POST"])
 def edit_income(income_id):
+    user_id = current_user_id()
     amount = request.form.get("amount", "").strip()
     description = request.form.get("description", "").strip()
     income_date = request.form.get("date", "").strip()
@@ -820,8 +1258,8 @@ def edit_income(income_id):
 
     db = get_db()
     db.execute(
-        "UPDATE income SET amount = ?, description = ?, date = ?, category_id = ? WHERE id = ?",
-        (amount, description, income_date, int(category_id), income_id)
+        "UPDATE income SET amount = ?, description = ?, date = ?, category_id = ? WHERE id = ? AND user_id = ?",
+        (amount, description, income_date, int(category_id), income_id, user_id)
     )
     db.commit()
     flash("Income updated.", "success")
@@ -837,6 +1275,7 @@ def edit_income(income_id):
 @app.route("/ledger")
 def ledger():
     db = get_db()
+    user_id = current_user_id()
     month_filter = request.args.get("month", "")
 
     # Get all unique dates that have income or expenses
@@ -849,18 +1288,18 @@ def ledger():
                    COALESCE(exp.cnt, 0) AS expense_count,
                    COALESCE(inc.cnt, 0) AS income_count
             FROM (
-                SELECT date FROM expenses WHERE strftime('%Y-%m', date) = ?
+                SELECT date FROM expenses WHERE strftime('%Y-%m', date) = ? AND user_id = ?
                 UNION
-                SELECT date FROM income WHERE strftime('%Y-%m', date) = ?
+                SELECT date FROM income WHERE strftime('%Y-%m', date) = ? AND user_id = ?
             ) d
             LEFT JOIN (
-                SELECT date, SUM(amount) AS total, COUNT(*) AS cnt FROM expenses GROUP BY date
+                SELECT date, SUM(amount) AS total, COUNT(*) AS cnt FROM expenses WHERE user_id = ? GROUP BY date
             ) exp ON d.date = exp.date
             LEFT JOIN (
-                SELECT date, SUM(amount) AS total, COUNT(*) AS cnt FROM income GROUP BY date
+                SELECT date, SUM(amount) AS total, COUNT(*) AS cnt FROM income WHERE user_id = ? GROUP BY date
             ) inc ON d.date = inc.date
             ORDER BY d.date DESC
-        """, (month_filter, month_filter)).fetchall()
+        """, (month_filter, user_id, month_filter, user_id, user_id, user_id)).fetchall()
     else:
         days = db.execute("""
             SELECT d.date,
@@ -869,28 +1308,28 @@ def ledger():
                    COALESCE(exp.cnt, 0) AS expense_count,
                    COALESCE(inc.cnt, 0) AS income_count
             FROM (
-                SELECT date FROM expenses
+                SELECT date FROM expenses WHERE user_id = ?
                 UNION
-                SELECT date FROM income
+                SELECT date FROM income WHERE user_id = ?
             ) d
             LEFT JOIN (
-                SELECT date, SUM(amount) AS total, COUNT(*) AS cnt FROM expenses GROUP BY date
+                SELECT date, SUM(amount) AS total, COUNT(*) AS cnt FROM expenses WHERE user_id = ? GROUP BY date
             ) exp ON d.date = exp.date
             LEFT JOIN (
-                SELECT date, SUM(amount) AS total, COUNT(*) AS cnt FROM income GROUP BY date
+                SELECT date, SUM(amount) AS total, COUNT(*) AS cnt FROM income WHERE user_id = ? GROUP BY date
             ) inc ON d.date = inc.date
             ORDER BY d.date DESC
-        """).fetchall()
+        """, (user_id, user_id, user_id, user_id)).fetchall()
 
     # Available months for the filter dropdown
     available_months = db.execute("""
         SELECT DISTINCT month FROM (
-            SELECT strftime('%Y-%m', date) AS month FROM expenses
+            SELECT strftime('%Y-%m', date) AS month FROM expenses WHERE user_id = ?
             UNION
-            SELECT strftime('%Y-%m', date) AS month FROM income
+            SELECT strftime('%Y-%m', date) AS month FROM income WHERE user_id = ?
         )
         ORDER BY month DESC
-    """).fetchall()
+    """, (user_id, user_id)).fetchall()
 
     return render_template(
         "ledger.html",
@@ -903,6 +1342,7 @@ def ledger():
 @app.route("/ledger/<date_str>")
 def ledger_day(date_str):
     db = get_db()
+    user_id = current_user_id()
 
     # Validate date format
     try:
@@ -916,18 +1356,18 @@ def ledger_day(date_str):
         SELECT i.id, i.amount, i.description, i.date, i.category_id, ic.name AS category
         FROM income i
         JOIN income_categories ic ON i.category_id = ic.id
-        WHERE i.date = ?
+        WHERE i.date = ? AND i.user_id = ?
         ORDER BY i.created_at DESC
-    """, (date_str,)).fetchall()
+    """, (date_str, user_id)).fetchall()
 
     # Expense entries for this date
     expense_entries = db.execute("""
         SELECT e.id, e.amount, e.description, e.date, e.category_id, c.name AS category
         FROM expenses e
         JOIN categories c ON e.category_id = c.id
-        WHERE e.date = ?
+        WHERE e.date = ? AND e.user_id = ?
         ORDER BY e.created_at DESC
-    """, (date_str,)).fetchall()
+    """, (date_str, user_id)).fetchall()
 
     # Totals
     income_total = sum(e["amount"] for e in income_entries)
@@ -960,6 +1400,7 @@ def ledger_day(date_str):
 @app.route("/reports")
 def reports():
     db = get_db()
+    user_id = current_user_id()
     from_date = request.args.get("from_date", "")
     to_date = request.args.get("to_date", "")
 
@@ -974,25 +1415,25 @@ def reports():
                 SELECT e.id, e.amount, e.description, e.date, c.name AS category, 'expense' AS type, e.created_at
                 FROM expenses e
                 JOIN categories c ON e.category_id = c.id
-                WHERE e.date >= ? AND e.date <= ?
+                WHERE e.date >= ? AND e.date <= ? AND e.user_id = ?
                 UNION ALL
                 SELECT i.id, i.amount, i.description, i.date, ic.name AS category, 'income' AS type, i.created_at
                 FROM income i
                 JOIN income_categories ic ON i.category_id = ic.id
-                WHERE i.date >= ? AND i.date <= ?
+                WHERE i.date >= ? AND i.date <= ? AND i.user_id = ?
             )
             ORDER BY date DESC, created_at DESC
-        """, (from_date, to_date, from_date, to_date)).fetchall()
+        """, (from_date, to_date, user_id, from_date, to_date, user_id)).fetchall()
 
         row = db.execute(
-            "SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE date >= ? AND date <= ?",
-            (from_date, to_date)
+            "SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE date >= ? AND date <= ? AND user_id = ?",
+            (from_date, to_date, user_id)
         ).fetchone()
         range_total = row["total"]
 
         row = db.execute(
-            "SELECT COALESCE(SUM(amount), 0) AS total FROM income WHERE date >= ? AND date <= ?",
-            (from_date, to_date)
+            "SELECT COALESCE(SUM(amount), 0) AS total FROM income WHERE date >= ? AND date <= ? AND user_id = ?",
+            (from_date, to_date, user_id)
         ).fetchone()
         range_income = row["total"]
 
@@ -1000,19 +1441,21 @@ def reports():
     monthly_expenses = db.execute("""
         SELECT strftime('%Y-%m', date) AS month, SUM(amount) AS total
         FROM expenses
+        WHERE user_id = ?
         GROUP BY month
         ORDER BY month DESC
         LIMIT 12
-    """).fetchall()
+    """, (user_id,)).fetchall()
 
     # Monthly breakdown — income
     monthly_income = db.execute("""
         SELECT strftime('%Y-%m', date) AS month, SUM(amount) AS total
         FROM income
+        WHERE user_id = ?
         GROUP BY month
         ORDER BY month DESC
         LIMIT 12
-    """).fetchall()
+    """, (user_id,)).fetchall()
 
     # Merge monthly data
     income_map = {m["month"]: m["total"] for m in monthly_income}
@@ -1036,26 +1479,28 @@ def reports():
         SELECT c.name, COALESCE(SUM(e.amount), 0) AS total, COUNT(e.id) AS count
         FROM expenses e
         JOIN categories c ON e.category_id = c.id
+        WHERE e.user_id = ?
         GROUP BY c.name
         ORDER BY total DESC
-    """).fetchall()
+    """, (user_id,)).fetchall()
 
     # Income source breakdown (all time)
     by_source = db.execute("""
         SELECT ic.name, COALESCE(SUM(i.amount), 0) AS total, COUNT(i.id) AS count
         FROM income i
         JOIN income_categories ic ON i.category_id = ic.id
+        WHERE i.user_id = ?
         GROUP BY ic.name
         ORDER BY total DESC
-    """).fetchall()
+    """, (user_id,)).fetchall()
 
     # Daily average this month
     month_start = date.today().replace(day=1).isoformat()
     row = db.execute("""
         SELECT COALESCE(SUM(amount), 0) AS total,
                COUNT(DISTINCT date) AS days
-        FROM expenses WHERE date >= ?
-    """, (month_start,)).fetchone()
+        FROM expenses WHERE date >= ? AND user_id = ?
+    """, (month_start, user_id)).fetchone()
     daily_avg = row["total"] / max(row["days"], 1)
 
     return render_template(
@@ -1079,15 +1524,16 @@ def reports():
 @app.route("/categories")
 def categories():
     db = get_db()
+    user_id = current_user_id()
     cats = db.execute("""
         SELECT c.id, c.name, c.created_at,
                COUNT(e.id) AS expense_count,
                COALESCE(SUM(e.amount), 0) AS total_amount
         FROM categories c
-        LEFT JOIN expenses e ON c.id = e.category_id
+        LEFT JOIN expenses e ON c.id = e.category_id AND e.user_id = ?
         GROUP BY c.id
         ORDER BY c.name
-    """).fetchall()
+    """, (user_id,)).fetchall()
 
     # Income categories
     income_cats = db.execute("""
@@ -1095,10 +1541,10 @@ def categories():
                COUNT(i.id) AS income_count,
                COALESCE(SUM(i.amount), 0) AS total_amount
         FROM income_categories ic
-        LEFT JOIN income i ON ic.id = i.category_id
+        LEFT JOIN income i ON ic.id = i.category_id AND i.user_id = ?
         GROUP BY ic.id
         ORDER BY ic.name
-    """).fetchall()
+    """, (user_id,)).fetchall()
 
     return render_template("categories.html", categories=cats, income_categories=income_cats)
 
@@ -1226,12 +1672,14 @@ def delete_income_category(cat_id):
 @app.route("/wishlist")
 def wishlist():
     db = get_db()
+    user_id = current_user_id()
     active = db.execute(
-        "SELECT * FROM wishlist WHERE purchased = 0 ORDER BY "
+        "SELECT * FROM wishlist WHERE purchased = 0 AND user_id = ? ORDER BY "
         "CASE priority WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END, created_at DESC"
-    ).fetchall()
+    , (user_id,)).fetchall()
     purchased = db.execute(
-        "SELECT * FROM wishlist WHERE purchased = 1 ORDER BY purchased_at DESC"
+        "SELECT * FROM wishlist WHERE purchased = 1 AND user_id = ? ORDER BY purchased_at DESC",
+        (user_id,)
     ).fetchall()
 
     # Stats
@@ -1249,6 +1697,7 @@ def wishlist():
 
 @app.route("/wishlist/add", methods=["POST"])
 def add_wishlist():
+    user_id = current_user_id()
     name = request.form.get("name", "").strip()
     price = request.form.get("price", "0").strip()
     priority = request.form.get("priority", "medium").strip()
@@ -1265,8 +1714,8 @@ def add_wishlist():
 
     db = get_db()
     db.execute(
-        "INSERT INTO wishlist (name, price, priority, notes) VALUES (?, ?, ?, ?)",
-        (name, price, priority, notes)
+        "INSERT INTO wishlist (user_id, name, price, priority, notes) VALUES (?, ?, ?, ?, ?)",
+        (user_id, name, price, priority, notes)
     )
     db.commit()
     flash(f"'{name}' added to wishlist.", "success")
@@ -1275,6 +1724,7 @@ def add_wishlist():
 
 @app.route("/wishlist/edit/<int:item_id>", methods=["POST"])
 def edit_wishlist(item_id):
+    user_id = current_user_id()
     name = request.form.get("name", "").strip()
     price = request.form.get("price", "0").strip()
     priority = request.form.get("priority", "medium").strip()
@@ -1291,8 +1741,8 @@ def edit_wishlist(item_id):
 
     db = get_db()
     db.execute(
-        "UPDATE wishlist SET name = ?, price = ?, priority = ?, notes = ? WHERE id = ?",
-        (name, price, priority, notes, item_id)
+        "UPDATE wishlist SET name = ?, price = ?, priority = ?, notes = ? WHERE id = ? AND user_id = ?",
+        (name, price, priority, notes, item_id, user_id)
     )
     db.commit()
     flash(f"'{name}' updated.", "success")
@@ -1302,9 +1752,10 @@ def edit_wishlist(item_id):
 @app.route("/wishlist/purchase/<int:item_id>", methods=["POST"])
 def purchase_wishlist(item_id):
     db = get_db()
+    user_id = current_user_id()
     db.execute(
-        "UPDATE wishlist SET purchased = 1, purchased_at = datetime('now','localtime') WHERE id = ?",
-        (item_id,)
+        "UPDATE wishlist SET purchased = 1, purchased_at = datetime('now','localtime') WHERE id = ? AND user_id = ?",
+        (item_id, user_id)
     )
     db.commit()
     flash("Item marked as purchased.", "success")
@@ -1314,7 +1765,8 @@ def purchase_wishlist(item_id):
 @app.route("/wishlist/delete/<int:item_id>", methods=["POST"])
 def delete_wishlist(item_id):
     db = get_db()
-    db.execute("DELETE FROM wishlist WHERE id = ?", (item_id,))
+    user_id = current_user_id()
+    db.execute("DELETE FROM wishlist WHERE id = ? AND user_id = ?", (item_id, user_id))
     db.commit()
     flash("Wishlist item deleted.", "success")
     return redirect(url_for("wishlist"))
@@ -1334,7 +1786,7 @@ def recognize_transaction_photo():
             "error": "Google GenAI SDK is not installed. Add 'google-genai' to requirements and install dependencies."
         }), 500
 
-    api_key = os.environ.get("GEMINI_API_KEY", API_KEY).strip()
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
         return jsonify({
             "ok": False,
@@ -1684,13 +2136,14 @@ Format:
 def api_daily_expenses():
     """Return last 30 days of daily expense totals for charting."""
     db = get_db()
+    user_id = current_user_id()
     rows = db.execute("""
         SELECT date, SUM(amount) AS total
         FROM expenses
-        WHERE date >= date('now', '-30 days', 'localtime')
+        WHERE date >= date('now', '-30 days', 'localtime') AND user_id = ?
         GROUP BY date
         ORDER BY date
-    """).fetchall()
+    """, (user_id,)).fetchall()
     return jsonify([{"date": r["date"], "total": r["total"]} for r in rows])
 
 
@@ -1699,14 +2152,15 @@ def api_category_breakdown():
     """Return category totals for the current month."""
     month_start = date.today().replace(day=1).isoformat()
     db = get_db()
+    user_id = current_user_id()
     rows = db.execute("""
         SELECT c.name, COALESCE(SUM(e.amount), 0) AS total
         FROM expenses e
         JOIN categories c ON e.category_id = c.id
-        WHERE e.date >= ?
+        WHERE e.date >= ? AND e.user_id = ?
         GROUP BY c.name
         ORDER BY total DESC
-    """, (month_start,)).fetchall()
+    """, (month_start, user_id)).fetchall()
     return jsonify([{"name": r["name"], "total": r["total"]} for r in rows])
 
 
