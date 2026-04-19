@@ -146,6 +146,8 @@ def load_user_and_require_auth():
         ).fetchone()
         if g.current_user is None:
             session.clear()
+        else:
+            ensure_user_default_categories(g.current_user["id"])
 
     if endpoint.startswith("static") or endpoint in public_endpoints:
         return None
@@ -518,8 +520,11 @@ def init_db():
 
         CREATE TABLE IF NOT EXISTS categories (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            name        TEXT    NOT NULL UNIQUE,
-            created_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+            user_id     INTEGER NOT NULL,
+            name        TEXT    NOT NULL,
+            created_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
+            UNIQUE(user_id, name),
+            FOREIGN KEY (user_id) REFERENCES users(id)
         );
 
         CREATE TABLE IF NOT EXISTS expenses (
@@ -550,8 +555,11 @@ def init_db():
 
         CREATE TABLE IF NOT EXISTS income_categories (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            name        TEXT    NOT NULL UNIQUE,
-            created_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+            user_id     INTEGER NOT NULL,
+            name        TEXT    NOT NULL,
+            created_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
+            UNIQUE(user_id, name),
+            FOREIGN KEY (user_id) REFERENCES users(id)
         );
 
         CREATE TABLE IF NOT EXISTS income (
@@ -594,25 +602,101 @@ def init_db():
     wishlist_cols = [r[1] for r in db.execute("PRAGMA table_info(wishlist)").fetchall()]
     if "user_id" not in wishlist_cols:
         db.execute("ALTER TABLE wishlist ADD COLUMN user_id INTEGER")
+
+    _migrate_category_tables_to_user_scope(db)
     db.commit()
 
-    # Seed default expense categories
-    cursor = db.execute("SELECT COUNT(*) FROM categories")
-    if cursor.fetchone()[0] == 0:
-        db.execute("INSERT INTO categories (name) VALUES ('Makanan')")
-        db.execute("INSERT INTO categories (name) VALUES ('Minuman')")
-        db.commit()
-
-    # Seed default income categories
-    cursor = db.execute("SELECT COUNT(*) FROM income_categories")
-    if cursor.fetchone()[0] == 0:
-        db.execute("INSERT INTO income_categories (name) VALUES ('Bank')")
-        db.execute("INSERT INTO income_categories (name) VALUES ('Cash')")
-        db.execute("INSERT INTO income_categories (name) VALUES ('Salary')")
-        db.execute("INSERT INTO income_categories (name) VALUES ('Freelance')")
-        db.commit()
-
     db.close()
+
+
+def _migrate_category_tables_to_user_scope(db):
+    """Migrate legacy global categories into user-owned categories."""
+
+    def _is_user_scoped(table_name):
+        cols = [r[1] for r in db.execute(f"PRAGMA table_info({table_name})").fetchall()]
+        if "user_id" not in cols:
+            return False
+        create_sql_row = db.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table_name,),
+        ).fetchone()
+        create_sql = (create_sql_row[0] or "") if create_sql_row else ""
+        return "UNIQUE(user_id, name)" in create_sql or "UNIQUE (user_id, name)" in create_sql
+
+    def _migrate_single(table_name, tx_table, tx_pk_col, fallback_name):
+        if _is_user_scoped(table_name):
+            return
+
+        first_user = db.execute("SELECT id FROM users ORDER BY id LIMIT 1").fetchone()
+        default_user_id = first_user[0] if first_user else None
+        tx_count = db.execute(f"SELECT COUNT(*) FROM {tx_table}").fetchone()[0]
+        if tx_count > 0 and default_user_id is None:
+            # Delay migration until at least one user exists.
+            return
+
+        db.execute("PRAGMA foreign_keys=OFF")
+
+        db.execute(f"DROP TABLE IF EXISTS {table_name}_new")
+        db.execute(
+            f"""
+            CREATE TABLE {table_name}_new (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id     INTEGER NOT NULL,
+                name        TEXT    NOT NULL,
+                created_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
+                UNIQUE(user_id, name),
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+            """
+        )
+
+        tx_rows = db.execute(
+            f"""
+            SELECT t.{tx_pk_col} AS tx_id,
+                   COALESCE(t.user_id, 0) AS tx_user_id,
+                   COALESCE(c.name, ?) AS cat_name,
+                   COALESCE(c.created_at, datetime('now','localtime')) AS cat_created_at
+            FROM {tx_table} t
+            LEFT JOIN {table_name} c ON c.id = t.category_id
+            ORDER BY t.{tx_pk_col}
+            """,
+            (fallback_name,),
+        ).fetchall()
+
+        category_id_map = {}
+        for tx_id, tx_user_id, cat_name, cat_created_at in tx_rows:
+            resolved_user_id = tx_user_id if int(tx_user_id or 0) > 0 else default_user_id
+            if resolved_user_id is None:
+                continue
+
+            key = (int(resolved_user_id), str(cat_name or fallback_name).strip() or fallback_name)
+            new_cat_id = category_id_map.get(key)
+            if new_cat_id is None:
+                existing = db.execute(
+                    f"SELECT id FROM {table_name}_new WHERE user_id = ? AND name = ?",
+                    (key[0], key[1]),
+                ).fetchone()
+                if existing:
+                    new_cat_id = existing[0]
+                else:
+                    cur = db.execute(
+                        f"INSERT INTO {table_name}_new (user_id, name, created_at) VALUES (?, ?, ?)",
+                        (key[0], key[1], cat_created_at),
+                    )
+                    new_cat_id = cur.lastrowid
+                category_id_map[key] = new_cat_id
+
+            db.execute(
+                f"UPDATE {tx_table} SET category_id = ? WHERE {tx_pk_col} = ?",
+                (new_cat_id, tx_id),
+            )
+
+        db.execute(f"DROP TABLE {table_name}")
+        db.execute(f"ALTER TABLE {table_name}_new RENAME TO {table_name}")
+        db.execute("PRAGMA foreign_keys=ON")
+
+    _migrate_single("categories", "expenses", "id", "Uncategorized")
+    _migrate_single("income_categories", "income", "id", "Other")
 
 
 def claim_legacy_records(user_id):
@@ -646,6 +730,26 @@ def _utc_expiry_string(minutes_from_now):
 
 def _hash_reset_token(token):
     return hashlib.sha256(str(token).encode("utf-8")).hexdigest()
+
+
+def ensure_user_default_categories(user_id):
+    if not user_id:
+        return
+
+    db = get_db()
+    for name in ("Makanan", "Minuman"):
+        db.execute(
+            "INSERT OR IGNORE INTO categories (user_id, name) VALUES (?, ?)",
+            (user_id, name),
+        )
+
+    for name in ("Bank", "Cash", "Salary", "Freelance"):
+        db.execute(
+            "INSERT OR IGNORE INTO income_categories (user_id, name) VALUES (?, ?)",
+            (user_id, name),
+        )
+
+    db.commit()
 
 
 def _build_absolute_url(path):
@@ -741,6 +845,7 @@ def login():
         session.clear()
         session["user_id"] = user["id"]
         claim_legacy_records(user["id"])
+        ensure_user_default_categories(user["id"])
         flash("Logged in successfully.", "success")
         if next_url:
             return redirect(next_url)
@@ -785,6 +890,7 @@ def register():
         session.clear()
         session["user_id"] = cursor.lastrowid
         claim_legacy_records(cursor.lastrowid)
+        ensure_user_default_categories(cursor.lastrowid)
         flash("Account created.", "success")
         return redirect(url_for("dashboard"))
 
@@ -1009,7 +1115,8 @@ def expenses_page():
         grouped[d].append(exp)
 
     categories = db.execute(
-        "SELECT id, name FROM categories ORDER BY name"
+        "SELECT id, name FROM categories WHERE user_id = ? ORDER BY name",
+        (user_id,)
     ).fetchall()
 
     top_cats = db.execute("""
@@ -1053,14 +1160,23 @@ def add_expense():
 
     try:
         amount = float(amount)
+        category_id_int = int(category_id)
     except ValueError:
-        flash("Invalid amount.", "error")
+        flash("Invalid amount or category.", "error")
         return redirect(url_for("expenses_page"))
 
     db = get_db()
+    owned_category = db.execute(
+        "SELECT id FROM categories WHERE id = ? AND user_id = ?",
+        (category_id_int, user_id),
+    ).fetchone()
+    if owned_category is None:
+        flash("Invalid category selection.", "error")
+        return redirect(url_for("expenses_page"))
+
     db.execute(
         "INSERT INTO expenses (user_id, amount, description, date, category_id, receipt_image) VALUES (?, ?, ?, ?, ?, ?)",
-        (user_id, amount, description, expense_date, int(category_id), receipt_image)
+        (user_id, amount, description, expense_date, category_id_int, receipt_image)
     )
     db.commit()
     flash("Expense added.", "success")
@@ -1097,16 +1213,27 @@ def edit_expense(expense_id):
 
     try:
         amount = float(amount)
+        category_id_int = int(category_id)
     except ValueError:
-        flash("Invalid amount.", "error")
+        flash("Invalid amount or category.", "error")
         if redirect_to:
             return redirect(redirect_to)
         return redirect(url_for("expenses_page"))
 
     db = get_db()
+    owned_category = db.execute(
+        "SELECT id FROM categories WHERE id = ? AND user_id = ?",
+        (category_id_int, user_id),
+    ).fetchone()
+    if owned_category is None:
+        flash("Invalid category selection.", "error")
+        if redirect_to:
+            return redirect(redirect_to)
+        return redirect(url_for("expenses_page"))
+
     db.execute(
         "UPDATE expenses SET amount = ?, description = ?, date = ?, category_id = ? WHERE id = ? AND user_id = ?",
-        (amount, description, expense_date, int(category_id), expense_id, user_id)
+        (amount, description, expense_date, category_id_int, expense_id, user_id)
     )
     db.commit()
     flash("Expense updated.", "success")
@@ -1165,7 +1292,8 @@ def income_page():
 
     # Income categories for the form
     income_cats = db.execute(
-        "SELECT id, name FROM income_categories ORDER BY name"
+        "SELECT id, name FROM income_categories WHERE user_id = ? ORDER BY name",
+        (user_id,)
     ).fetchall()
 
     # Top income sources this month
@@ -1206,14 +1334,23 @@ def add_income():
 
     try:
         amount = float(amount)
+        category_id_int = int(category_id)
     except ValueError:
-        flash("Invalid amount.", "error")
+        flash("Invalid amount or source.", "error")
         return redirect(url_for("income_page"))
 
     db = get_db()
+    owned_category = db.execute(
+        "SELECT id FROM income_categories WHERE id = ? AND user_id = ?",
+        (category_id_int, user_id),
+    ).fetchone()
+    if owned_category is None:
+        flash("Invalid source selection.", "error")
+        return redirect(url_for("income_page"))
+
     db.execute(
         "INSERT INTO income (user_id, amount, description, date, category_id, receipt_image) VALUES (?, ?, ?, ?, ?, ?)",
-        (user_id, amount, description, income_date, int(category_id), receipt_image)
+        (user_id, amount, description, income_date, category_id_int, receipt_image)
     )
     db.commit()
     flash("Income added.", "success")
@@ -1250,16 +1387,27 @@ def edit_income(income_id):
 
     try:
         amount = float(amount)
+        category_id_int = int(category_id)
     except ValueError:
-        flash("Invalid amount.", "error")
+        flash("Invalid amount or source.", "error")
         if redirect_to:
             return redirect(redirect_to)
         return redirect(url_for("income_page"))
 
     db = get_db()
+    owned_category = db.execute(
+        "SELECT id FROM income_categories WHERE id = ? AND user_id = ?",
+        (category_id_int, user_id),
+    ).fetchone()
+    if owned_category is None:
+        flash("Invalid source selection.", "error")
+        if redirect_to:
+            return redirect(redirect_to)
+        return redirect(url_for("income_page"))
+
     db.execute(
         "UPDATE income SET amount = ?, description = ?, date = ?, category_id = ? WHERE id = ? AND user_id = ?",
-        (amount, description, income_date, int(category_id), income_id, user_id)
+        (amount, description, income_date, category_id_int, income_id, user_id)
     )
     db.commit()
     flash("Income updated.", "success")
@@ -1374,12 +1522,27 @@ def ledger_day(date_str):
     expense_total = sum(e["amount"] for e in expense_entries)
 
     # Categories for edit modals
-    expense_categories = db.execute(
-        "SELECT id, name FROM categories ORDER BY name"
+    expense_category_rows = db.execute(
+        "SELECT id, name FROM categories WHERE user_id = ? ORDER BY name",
+        (user_id,)
     ).fetchall()
-    income_categories = db.execute(
-        "SELECT id, name FROM income_categories ORDER BY name"
+    income_category_rows = db.execute(
+        "SELECT id, name FROM income_categories WHERE user_id = ? ORDER BY name",
+        (user_id,)
     ).fetchall()
+
+    # Fallback labels for historical rows tied to legacy category records.
+    expense_known_ids = {row["id"] for row in expense_category_rows}
+    income_known_ids = {row["id"] for row in income_category_rows}
+    if any(entry["category_id"] not in expense_known_ids for entry in expense_entries):
+        expense_category_rows = list(expense_category_rows)
+        expense_category_rows.append({"id": -1, "name": "Uncategorized"})
+    if any(entry["category_id"] not in income_known_ids for entry in income_entries):
+        income_category_rows = list(income_category_rows)
+        income_category_rows.append({"id": -1, "name": "Other"})
+
+    expense_categories = expense_category_rows
+    income_categories = income_category_rows
 
     return render_template(
         "ledger_day.html",
@@ -1531,9 +1694,10 @@ def categories():
                COALESCE(SUM(e.amount), 0) AS total_amount
         FROM categories c
         LEFT JOIN expenses e ON c.id = e.category_id AND e.user_id = ?
+        WHERE c.user_id = ?
         GROUP BY c.id
         ORDER BY c.name
-    """, (user_id,)).fetchall()
+    """, (user_id, user_id)).fetchall()
 
     # Income categories
     income_cats = db.execute("""
@@ -1542,15 +1706,17 @@ def categories():
                COALESCE(SUM(i.amount), 0) AS total_amount
         FROM income_categories ic
         LEFT JOIN income i ON ic.id = i.category_id AND i.user_id = ?
+        WHERE ic.user_id = ?
         GROUP BY ic.id
         ORDER BY ic.name
-    """, (user_id,)).fetchall()
+    """, (user_id, user_id)).fetchall()
 
     return render_template("categories.html", categories=cats, income_categories=income_cats)
 
 
 @app.route("/categories/add", methods=["POST"])
 def add_category():
+    user_id = current_user_id()
     name = request.form.get("name", "").strip()
     if not name:
         if request.headers.get("X-Requested-With") == "fetch":
@@ -1560,15 +1726,15 @@ def add_category():
 
     db = get_db()
     try:
-        cursor = db.execute("INSERT INTO categories (name) VALUES (?)", (name,))
+        cursor = db.execute("INSERT INTO categories (user_id, name) VALUES (?, ?)", (user_id, name))
         db.commit()
         if request.headers.get("X-Requested-With") == "fetch":
-            row = db.execute("SELECT id, name FROM categories WHERE id = ?", (cursor.lastrowid,)).fetchone()
+            row = db.execute("SELECT id, name FROM categories WHERE id = ? AND user_id = ?", (cursor.lastrowid, user_id)).fetchone()
             return jsonify({"ok": True, "id": row["id"], "name": row["name"]})
         flash(f"Category '{name}' added.", "success")
     except sqlite3.IntegrityError:
         if request.headers.get("X-Requested-With") == "fetch":
-            row = db.execute("SELECT id, name FROM categories WHERE name = ?", (name,)).fetchone()
+            row = db.execute("SELECT id, name FROM categories WHERE user_id = ? AND name = ?", (user_id, name)).fetchone()
             return jsonify({"ok": True, "id": row["id"], "name": row["name"], "existing": True})
         flash(f"Category '{name}' already exists.", "error")
     return redirect(url_for("categories"))
@@ -1577,29 +1743,40 @@ def add_category():
 @app.route("/categories/delete/<int:cat_id>", methods=["POST"])
 def delete_category(cat_id):
     db = get_db()
+    user_id = current_user_id()
+
+    owned = db.execute(
+        "SELECT id FROM categories WHERE id = ? AND user_id = ?",
+        (cat_id, user_id),
+    ).fetchone()
+    if owned is None:
+        flash("Category not found.", "error")
+        return redirect(url_for("categories"))
 
     # Check if category has expenses
     row = db.execute(
-        "SELECT COUNT(*) AS cnt FROM expenses WHERE category_id = ?", (cat_id,)
+        "SELECT COUNT(*) AS cnt FROM expenses WHERE category_id = ? AND user_id = ?", (cat_id, user_id)
     ).fetchone()
 
     if row["cnt"] > 0:
         # Reassign to "Uncategorized" — create it if needed
         unc = db.execute(
-            "SELECT id FROM categories WHERE name = 'Uncategorized'"
+            "SELECT id FROM categories WHERE user_id = ? AND name = 'Uncategorized'",
+            (user_id,),
         ).fetchone()
         if unc is None:
-            db.execute("INSERT INTO categories (name) VALUES ('Uncategorized')")
+            db.execute("INSERT INTO categories (user_id, name) VALUES (?, 'Uncategorized')", (user_id,))
             db.commit()
             unc = db.execute(
-                "SELECT id FROM categories WHERE name = 'Uncategorized'"
+                "SELECT id FROM categories WHERE user_id = ? AND name = 'Uncategorized'",
+                (user_id,),
             ).fetchone()
         db.execute(
-            "UPDATE expenses SET category_id = ? WHERE category_id = ?",
-            (unc["id"], cat_id)
+            "UPDATE expenses SET category_id = ? WHERE category_id = ? AND user_id = ?",
+            (unc["id"], cat_id, user_id)
         )
 
-    db.execute("DELETE FROM categories WHERE id = ?", (cat_id,))
+    db.execute("DELETE FROM categories WHERE id = ? AND user_id = ?", (cat_id, user_id))
     db.commit()
     flash("Category deleted.", "success")
     return redirect(url_for("categories"))
@@ -1611,6 +1788,7 @@ def delete_category(cat_id):
 
 @app.route("/income-categories/add", methods=["POST"])
 def add_income_category():
+    user_id = current_user_id()
     name = request.form.get("name", "").strip()
     if not name:
         if request.headers.get("X-Requested-With") == "fetch":
@@ -1620,15 +1798,15 @@ def add_income_category():
 
     db = get_db()
     try:
-        cursor = db.execute("INSERT INTO income_categories (name) VALUES (?)", (name,))
+        cursor = db.execute("INSERT INTO income_categories (user_id, name) VALUES (?, ?)", (user_id, name))
         db.commit()
         if request.headers.get("X-Requested-With") == "fetch":
-            row = db.execute("SELECT id, name FROM income_categories WHERE id = ?", (cursor.lastrowid,)).fetchone()
+            row = db.execute("SELECT id, name FROM income_categories WHERE id = ? AND user_id = ?", (cursor.lastrowid, user_id)).fetchone()
             return jsonify({"ok": True, "id": row["id"], "name": row["name"]})
         flash(f"Income source '{name}' added.", "success")
     except sqlite3.IntegrityError:
         if request.headers.get("X-Requested-With") == "fetch":
-            row = db.execute("SELECT id, name FROM income_categories WHERE name = ?", (name,)).fetchone()
+            row = db.execute("SELECT id, name FROM income_categories WHERE user_id = ? AND name = ?", (user_id, name)).fetchone()
             return jsonify({"ok": True, "id": row["id"], "name": row["name"], "existing": True})
         flash(f"Income source '{name}' already exists.", "error")
     return redirect(url_for("categories"))
@@ -1637,29 +1815,40 @@ def add_income_category():
 @app.route("/income-categories/delete/<int:cat_id>", methods=["POST"])
 def delete_income_category(cat_id):
     db = get_db()
+    user_id = current_user_id()
+
+    owned = db.execute(
+        "SELECT id FROM income_categories WHERE id = ? AND user_id = ?",
+        (cat_id, user_id),
+    ).fetchone()
+    if owned is None:
+        flash("Income source not found.", "error")
+        return redirect(url_for("categories"))
 
     # Check if category has income entries
     row = db.execute(
-        "SELECT COUNT(*) AS cnt FROM income WHERE category_id = ?", (cat_id,)
+        "SELECT COUNT(*) AS cnt FROM income WHERE category_id = ? AND user_id = ?", (cat_id, user_id)
     ).fetchone()
 
     if row["cnt"] > 0:
         # Reassign to "Other" — create it if needed
         unc = db.execute(
-            "SELECT id FROM income_categories WHERE name = 'Other'"
+            "SELECT id FROM income_categories WHERE user_id = ? AND name = 'Other'",
+            (user_id,),
         ).fetchone()
         if unc is None:
-            db.execute("INSERT INTO income_categories (name) VALUES ('Other')")
+            db.execute("INSERT INTO income_categories (user_id, name) VALUES (?, 'Other')", (user_id,))
             db.commit()
             unc = db.execute(
-                "SELECT id FROM income_categories WHERE name = 'Other'"
+                "SELECT id FROM income_categories WHERE user_id = ? AND name = 'Other'",
+                (user_id,),
             ).fetchone()
         db.execute(
-            "UPDATE income SET category_id = ? WHERE category_id = ?",
-            (unc["id"], cat_id)
+            "UPDATE income SET category_id = ? WHERE category_id = ? AND user_id = ?",
+            (unc["id"], cat_id, user_id)
         )
 
-    db.execute("DELETE FROM income_categories WHERE id = ?", (cat_id,))
+    db.execute("DELETE FROM income_categories WHERE id = ? AND user_id = ?", (cat_id, user_id))
     db.commit()
     flash("Income source deleted.", "success")
     return redirect(url_for("categories"))
@@ -1815,6 +2004,7 @@ def recognize_transaction_photo():
         target = "auto"
 
     db = get_db()
+    user_id = current_user_id()
 
     tx_type = "income" if target == "income" else "expense"
     today_default = datetime.now().strftime("%Y-%m-%d")
@@ -2102,9 +2292,9 @@ Format:
     if likely_category_match:
         likely_norm = _normalize_text(likely_category_match)
         if tx_type == "income":
-            rows = db.execute("SELECT name FROM income_categories").fetchall()
+            rows = db.execute("SELECT name FROM income_categories WHERE user_id = ?", (user_id,)).fetchall()
         else:
-            rows = db.execute("SELECT name FROM categories").fetchall()
+            rows = db.execute("SELECT name FROM categories WHERE user_id = ?", (user_id,)).fetchall()
         likely_category_exists = any(_normalize_text(row["name"]) == likely_norm for row in rows)
 
     if category_name_val:
