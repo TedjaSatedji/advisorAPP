@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="description" content="XPense — A refined financial tracking dashboard for daily expenses, wishlist management, and financial reporting.">
     <title>{% block title %}XPense{% endblock %}</title>
+    <link rel="icon" type="image/png" href="{{ url_for('static', filename='icons/xpense-logo.png') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='tailwind.output.css') }}">
     <style>
         /* ── Base font stack ── */
@@ -144,8 +145,16 @@
             gap: 0.5rem;
         }
 
-        .nav-brand .amber {
-            color: var(--accent);
+        .nav-logo {
+            width: 24px;
+            height: 24px;
+            object-fit: contain;
+            border-radius: 4px;
+            flex-shrink: 0;
+        }
+
+        .nav-title {
+            line-height: 1;
         }
 
         .nav-links {
@@ -860,7 +869,8 @@
     <nav class="nav-bar" id="main-nav">
         <div class="nav-inner">
             <a href="{{ url_for('dashboard') if current_user else url_for('login') }}" class="nav-brand">
-                <span class="amber">▸</span> XPense
+                <img src="{{ url_for('static', filename='icons/xpense-logo.png') }}" alt="XPense logo" class="nav-logo">
+                <span class="nav-title">XPense</span>
             </a>
             {% if current_user %}
             <ul class="nav-links" id="nav-links">
